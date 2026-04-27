@@ -1,4 +1,4 @@
-package com.wpanther.debitcreditnote.processing.infrastructure.persistence.outbox;
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
 
 import com.wpanther.saga.domain.outbox.OutboxStatus;
 import org.springframework.data.domain.Pageable;
