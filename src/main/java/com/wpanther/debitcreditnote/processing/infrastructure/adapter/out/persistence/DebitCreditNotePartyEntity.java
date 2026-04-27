@@ -1,4 +1,4 @@
-package com.wpanther.debitcreditnote.processing.infrastructure.persistence;
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
 
 import jakarta.persistence.*;
 import lombok.*;

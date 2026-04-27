@@ -1,4 +1,4 @@
-package com.wpanther.debitcreditnote.processing.infrastructure.persistence;
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
 
 import com.wpanther.debitcreditnote.processing.domain.model.*;
 import lombok.extern.slf4j.Slf4j;
