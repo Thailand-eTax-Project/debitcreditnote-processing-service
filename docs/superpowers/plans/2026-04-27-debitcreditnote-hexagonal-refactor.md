@@ -861,4 +861,2656 @@ git commit -m "Add outbound reply DTO DebitCreditNoteReplyEvent with static fact
 
 ---
 
-<!-- Tasks 10–22 will be added in subsequent batches -->
+## Task 10: HeaderSerializer
+
+**What:** Create `infrastructure/adapter/out/messaging/HeaderSerializer` — utility component for serializing outbox event headers to JSON. Throws `IllegalStateException` on failure (no silent fallback). Write test first.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/HeaderSerializer.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/HeaderSerializerTest.java`
+
+- [ ] **Step 1: Write the failing test**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/HeaderSerializerTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class HeaderSerializerTest {
+
+    @Mock
+    private ObjectMapper objectMapper;
+
+    @InjectMocks
+    private HeaderSerializer headerSerializer;
+
+    @Test
+    void toJson_successfulSerialization() throws JsonProcessingException {
+        Map<String, String> headers = Map.of("key", "value");
+        when(objectMapper.writeValueAsString(any())).thenReturn("{\"key\":\"value\"}");
+
+        String result = headerSerializer.toJson(headers);
+
+        assertEquals("{\"key\":\"value\"}", result);
+    }
+
+    @Test
+    void toJson_whenJsonProcessingException_throwsIllegalStateException() throws JsonProcessingException {
+        Map<String, String> headers = Map.of("key", "value");
+        when(objectMapper.writeValueAsString(any())).thenThrow(new JsonProcessingException("error") {});
+
+        assertThrows(IllegalStateException.class, () -> headerSerializer.toJson(headers));
+    }
+}
+```
+
+- [ ] **Step 2: Run test — verify it fails**
+
+```bash
+mvn test -Dtest=HeaderSerializerTest -pl . 2>&1 | tail -10
+```
+Expected: compilation error — `HeaderSerializer` does not exist.
+
+- [ ] **Step 3: Create HeaderSerializer**
+
+```java
+// src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/HeaderSerializer.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.util.Map;
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class HeaderSerializer {
+
+    private final ObjectMapper objectMapper;
+
+    public String toJson(Map<String, String> headers) {
+        try {
+            return objectMapper.writeValueAsString(headers);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize outbox headers to JSON: " + e.getMessage(), e);
+        }
+    }
+}
+```
+
+- [ ] **Step 4: Run test — verify it passes**
+
+```bash
+mvn test -Dtest=HeaderSerializerTest -pl . 2>&1 | tail -10
+```
+Expected: `BUILD SUCCESS`, both tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/HeaderSerializer.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/HeaderSerializerTest.java
+git commit -m "Add HeaderSerializer for outbox event header serialization"
+```
+
+---
+
+## Task 11: SagaReplyPublisher (outbound adapter, fix REQUIRES_NEW)
+
+**What:** Create `infrastructure/adapter/out/messaging/SagaReplyPublisher` implementing `SagaReplyPort`. Fixes the bug in the old `infrastructure/messaging/SagaReplyPublisher` where `publishFailure` used `MANDATORY` instead of `REQUIRES_NEW`. Delete the old file atomically after the new one is in place. Write Mockito unit test and `@SpringBootTest` transaction test.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisher.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisherTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisherTransactionTest.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/SagaReplyPublisher.java`
+
+**Important:** `infrastructure/messaging/SagaReplyPublisher` and `infrastructure/adapter/out/messaging/SagaReplyPublisher` are in different packages, so Spring will try to register BOTH beans at the same time, causing a conflict. The old file **must be deleted** in the same commit as creating the new file.
+
+- [ ] **Step 1: Write the Mockito unit test**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisherTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging.dto.DebitCreditNoteReplyEvent;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class SagaReplyPublisherTest {
+
+    @Mock
+    private OutboxService outboxService;
+
+    @Mock
+    private HeaderSerializer headerSerializer;
+
+    private SagaReplyPublisher publisher;
+
+    @BeforeEach
+    void setUp() {
+        publisher = new SagaReplyPublisher(outboxService, headerSerializer, "saga.reply.debitcreditnote");
+    }
+
+    @Test
+    void publishSuccess_callsOutboxWithCorrectParameters() {
+        when(headerSerializer.toJson(any())).thenReturn("{\"sagaId\":\"saga-1\",\"correlationId\":\"corr-1\",\"status\":\"SUCCESS\"}");
+
+        publisher.publishSuccess("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+
+        verify(outboxService).saveWithRouting(
+            any(DebitCreditNoteReplyEvent.class),
+            eq("ProcessedDebitCreditNote"),
+            eq("saga-1"),
+            eq("saga.reply.debitcreditnote"),
+            eq("saga-1"),
+            contains("SUCCESS")
+        );
+    }
+
+    @Test
+    void publishSuccess_usesSagaIdAsPartitionKey() {
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+
+        publisher.publishSuccess("my-saga-id", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+
+        ArgumentCaptor<String> partitionKeyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(
+            any(), any(), any(), any(),
+            partitionKeyCaptor.capture(),
+            any()
+        );
+
+        assertEquals("my-saga-id", partitionKeyCaptor.getValue());
+    }
+
+    @Test
+    void publishFailure_callsOutboxWithCorrectParameters() {
+        when(headerSerializer.toJson(any())).thenReturn("{\"sagaId\":\"saga-1\",\"correlationId\":\"corr-1\",\"status\":\"FAILURE\"}");
+
+        publisher.publishFailure("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1", "Parse error");
+
+        verify(outboxService).saveWithRouting(
+            any(DebitCreditNoteReplyEvent.class),
+            eq("ProcessedDebitCreditNote"),
+            eq("saga-1"),
+            eq("saga.reply.debitcreditnote"),
+            eq("saga-1"),
+            contains("FAILURE")
+        );
+    }
+
+    @Test
+    void publishCompensated_callsOutboxWithCorrectParameters() {
+        when(headerSerializer.toJson(any())).thenReturn("{\"sagaId\":\"saga-1\",\"correlationId\":\"corr-1\",\"status\":\"COMPENSATED\"}");
+
+        publisher.publishCompensated("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+
+        verify(outboxService).saveWithRouting(
+            any(DebitCreditNoteReplyEvent.class),
+            eq("ProcessedDebitCreditNote"),
+            eq("saga-1"),
+            eq("saga.reply.debitcreditnote"),
+            eq("saga-1"),
+            contains("COMPENSATED")
+        );
+    }
+
+    @Test
+    void publishSuccess_headersContainCorrectFields() {
+        when(headerSerializer.toJson(any())).thenReturn("{\"sagaId\":\"saga-1\",\"correlationId\":\"corr-1\",\"status\":\"SUCCESS\"}");
+
+        publisher.publishSuccess("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+
+        ArgumentCaptor<String> headersCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), any(), any(), any(), headersCaptor.capture());
+
+        String headers = headersCaptor.getValue();
+        assertTrue(headers.contains("saga-1"));
+        assertTrue(headers.contains("corr-1"));
+        assertTrue(headers.contains("SUCCESS"));
+    }
+
+    @Test
+    void publishReplyEvent_hasCorrectTopic() {
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+
+        publisher.publishSuccess("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+
+        ArgumentCaptor<String> topicCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), any(), topicCaptor.capture(), any(), any());
+
+        assertEquals("saga.reply.debitcreditnote", topicCaptor.getValue());
+    }
+
+    @Test
+    void publishReplyEvent_hasCorrectAggregateType() {
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+
+        publisher.publishFailure("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1", "error");
+
+        ArgumentCaptor<String> aggregateTypeCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), aggregateTypeCaptor.capture(), any(), any(), any(), any());
+
+        assertEquals("ProcessedDebitCreditNote", aggregateTypeCaptor.getValue());
+    }
+}
+```
+
+- [ ] **Step 2: Write the transaction propagation test**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisherTransactionTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox.OutboxEventEntity;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox.SpringDataOutboxRepository;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.UnexpectedRollbackException;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.util.List;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+@SpringBootTest
+@ActiveProfiles("test")
+class SagaReplyPublisherTransactionTest {
+
+    @Autowired
+    private SagaReplyPublisher sagaReplyPublisher;
+
+    @Autowired
+    private SpringDataOutboxRepository outboxRepository;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
+    @AfterEach
+    void cleanup() {
+        outboxRepository.deleteAll();
+    }
+
+    @Test
+    void publishFailure_commitsOutboxEntry_evenWhenOuterTransactionIsRollbackOnly() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+
+        try {
+            txTemplate.execute(status -> {
+                status.setRollbackOnly();
+                sagaReplyPublisher.publishFailure(
+                        sagaId, SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1", "duplicate key");
+                return null;
+            });
+        } catch (UnexpectedRollbackException | TransactionSystemException ignored) {
+            // expected — outer transaction was rolled back
+        }
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+                .filter(e -> e.getAggregateId().equals(sagaId))
+                .toList();
+
+        assertFalse(entries.isEmpty(),
+                "publishFailure() must commit its outbox entry in its own transaction " +
+                "so the orchestrator receives a FAILURE reply even when the outer " +
+                "transaction is rolled back");
+    }
+
+    @Test
+    void publishFailure_outboxEntry_containsFailureStatus() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+
+        try {
+            txTemplate.execute(status -> {
+                status.setRollbackOnly();
+                sagaReplyPublisher.publishFailure(
+                        sagaId, SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1", "some error");
+                return null;
+            });
+        } catch (UnexpectedRollbackException | TransactionSystemException ignored) {
+            // expected
+        }
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+                .filter(e -> e.getAggregateId().equals(sagaId))
+                .toList();
+
+        assertFalse(entries.isEmpty(), "outbox entry must exist");
+        assertTrue(entries.get(0).getPayload().contains("FAILURE"),
+                "outbox payload must indicate FAILURE status");
+    }
+
+    @Test
+    void publishCompensated_commitsOutboxEntry_togetherWithOuterTransaction() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+
+        txTemplate.execute(status -> {
+            sagaReplyPublisher.publishCompensated(
+                    sagaId, SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+            return null;
+        });
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+                .filter(e -> e.getAggregateId().equals(sagaId))
+                .toList();
+
+        assertFalse(entries.isEmpty(),
+                "publishCompensated() outbox entry must be committed with the outer transaction");
+    }
+
+    @Test
+    void publishCompensated_rollsBackOutboxEntry_whenOuterTransactionRollsBack() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+
+        try {
+            txTemplate.execute(status -> {
+                sagaReplyPublisher.publishCompensated(
+                        sagaId, SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+                status.setRollbackOnly();
+                return null;
+            });
+        } catch (UnexpectedRollbackException | TransactionSystemException ignored) {
+            // expected
+        }
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+                .filter(e -> e.getAggregateId().equals(sagaId))
+                .toList();
+
+        assertTrue(entries.isEmpty(),
+                "publishCompensated() outbox entry must be rolled back together with the outer " +
+                "transaction — a premature COMPENSATED reply must never be delivered");
+    }
+
+    @Test
+    void publishSuccess_commitsOutboxEntry_togetherWithOuterTransaction() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+
+        txTemplate.execute(status -> {
+            sagaReplyPublisher.publishSuccess(
+                    sagaId, SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+            return null;
+        });
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+                .filter(e -> e.getAggregateId().equals(sagaId))
+                .toList();
+
+        assertFalse(entries.isEmpty(),
+                "publishSuccess() outbox entry must be committed with the outer transaction");
+    }
+
+    @Test
+    void publishSuccess_rollsBackOutboxEntry_whenOuterTransactionRollsBack() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+
+        try {
+            txTemplate.execute(status -> {
+                sagaReplyPublisher.publishSuccess(
+                        sagaId, SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+                status.setRollbackOnly();
+                return null;
+            });
+        } catch (UnexpectedRollbackException | TransactionSystemException ignored) {
+            // expected
+        }
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+                .filter(e -> e.getAggregateId().equals(sagaId))
+                .toList();
+
+        assertTrue(entries.isEmpty(),
+                "publishSuccess() outbox entry must be rolled back together with the outer " +
+                "transaction — a premature success reply must never be delivered");
+    }
+}
+```
+
+- [ ] **Step 3: Run both tests — verify they fail**
+
+```bash
+mvn test -Dtest="SagaReplyPublisherTest,SagaReplyPublisherTransactionTest" -pl . 2>&1 | tail -15
+```
+Expected: compilation errors — the new `SagaReplyPublisher` and `SpringDataOutboxRepository` in the new package do not exist yet.
+
+- [ ] **Step 4: Create the new SagaReplyPublisher AND delete the old one in one atomic step**
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisher.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import com.wpanther.debitcreditnote.processing.application.port.out.SagaReplyPort;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging.dto.DebitCreditNoteReplyEvent;
+import com.wpanther.debitcreditnote.processing.infrastructure.config.KafkaTopicsProperties;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Map;
+
+@Component
+@Slf4j
+public class SagaReplyPublisher implements SagaReplyPort {
+
+    private static final String AGGREGATE_TYPE = "ProcessedDebitCreditNote";
+
+    private final OutboxService outboxService;
+    private final HeaderSerializer headerSerializer;
+    private final String replyTopic;
+
+    @Autowired
+    public SagaReplyPublisher(
+            OutboxService outboxService,
+            HeaderSerializer headerSerializer,
+            KafkaTopicsProperties topics) {
+        this(outboxService, headerSerializer, topics.sagaReplyDebitcreditnote());
+    }
+
+    SagaReplyPublisher(OutboxService outboxService, HeaderSerializer headerSerializer, String replyTopic) {
+        this.outboxService = outboxService;
+        this.headerSerializer = headerSerializer;
+        this.replyTopic = replyTopic;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publishSuccess(String sagaId, SagaStep sagaStep, String correlationId) {
+        DebitCreditNoteReplyEvent reply = DebitCreditNoteReplyEvent.success(sagaId, sagaStep, correlationId);
+
+        Map<String, String> headers = Map.of(
+            "sagaId", sagaId,
+            "correlationId", correlationId,
+            "status", "SUCCESS"
+        );
+
+        outboxService.saveWithRouting(
+            reply,
+            AGGREGATE_TYPE,
+            sagaId,
+            replyTopic,
+            sagaId,
+            headerSerializer.toJson(headers)
+        );
+
+        log.info("Published SUCCESS saga reply for saga {} step {}", sagaId, sagaStep);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void publishFailure(String sagaId, SagaStep sagaStep, String correlationId, String errorMessage) {
+        DebitCreditNoteReplyEvent reply = DebitCreditNoteReplyEvent.failure(sagaId, sagaStep, correlationId, errorMessage);
+
+        Map<String, String> headers = Map.of(
+            "sagaId", sagaId,
+            "correlationId", correlationId,
+            "status", "FAILURE"
+        );
+
+        outboxService.saveWithRouting(
+            reply,
+            AGGREGATE_TYPE,
+            sagaId,
+            replyTopic,
+            sagaId,
+            headerSerializer.toJson(headers)
+        );
+
+        log.info("Published FAILURE saga reply for saga {} step {}: {}", sagaId, sagaStep, errorMessage);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publishCompensated(String sagaId, SagaStep sagaStep, String correlationId) {
+        DebitCreditNoteReplyEvent reply = DebitCreditNoteReplyEvent.compensated(sagaId, sagaStep, correlationId);
+
+        Map<String, String> headers = Map.of(
+            "sagaId", sagaId,
+            "correlationId", correlationId,
+            "status", "COMPENSATED"
+        );
+
+        outboxService.saveWithRouting(
+            reply,
+            AGGREGATE_TYPE,
+            sagaId,
+            replyTopic,
+            sagaId,
+            headerSerializer.toJson(headers)
+        );
+
+        log.info("Published COMPENSATED saga reply for saga {} step {}", sagaId, sagaStep);
+    }
+}
+```
+
+Then delete the old file:
+```bash
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/SagaReplyPublisher.java
+```
+
+- [ ] **Step 5: Run the Mockito unit tests — verify they pass**
+
+```bash
+mvn test -Dtest=SagaReplyPublisherTest -pl . 2>&1 | tail -10
+```
+Expected: `BUILD SUCCESS`, all 7 tests pass.
+
+- [ ] **Step 6: Commit (new + deleted file in one commit)**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisher.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisherTest.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisherTransactionTest.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/SagaReplyPublisher.java
+git commit -m "Add SagaReplyPublisher adapter (fix publishFailure REQUIRES_NEW, delete old impl)"
+```
+
+---
+
+## Task 12: DebitCreditNoteEventPublisher (outbound adapter)
+
+**What:** Create `infrastructure/adapter/out/messaging/DebitCreditNoteEventPublisher` implementing `DebitCreditNoteEventPublishingPort`. Accepts the pure domain event, translates it to the Kafka DTO, and writes to outbox with `MANDATORY` propagation. Delete the old `infrastructure/messaging/EventPublisher`. Write test first.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/DebitCreditNoteEventPublisher.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/DebitCreditNoteEventPublisherTest.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/EventPublisher.java`
+
+- [ ] **Step 1: Write the failing test**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/DebitCreditNoteEventPublisherTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import com.wpanther.debitcreditnote.processing.application.dto.event.DebitCreditNoteProcessedEvent;
+import com.wpanther.debitcreditnote.processing.domain.event.DebitCreditNoteProcessedDomainEvent;
+import com.wpanther.debitcreditnote.processing.domain.model.Money;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.math.BigDecimal;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class DebitCreditNoteEventPublisherTest {
+
+    @Mock
+    private OutboxService outboxService;
+
+    @Mock
+    private HeaderSerializer headerSerializer;
+
+    private DebitCreditNoteEventPublisher eventPublisher;
+
+    @BeforeEach
+    void setUp() {
+        eventPublisher = new DebitCreditNoteEventPublisher(outboxService, headerSerializer, "debitcreditnote.processed");
+    }
+
+    @Test
+    void publish_callsOutboxWithCorrectParameters() {
+        DebitCreditNoteProcessedDomainEvent domainEvent = DebitCreditNoteProcessedDomainEvent.of(
+            "doc-1", "CN-001", Money.of(BigDecimal.valueOf(1500), "THB"), "saga-1", "corr-1"
+        );
+        when(headerSerializer.toJson(any())).thenReturn("{\"correlationId\":\"corr-1\",\"documentNumber\":\"CN-001\"}");
+
+        eventPublisher.publish(domainEvent);
+
+        verify(outboxService).saveWithRouting(
+            any(DebitCreditNoteProcessedEvent.class),
+            eq("ProcessedDebitCreditNote"),
+            eq("doc-1"),
+            eq("debitcreditnote.processed"),
+            eq("doc-1"),
+            eq("{\"correlationId\":\"corr-1\",\"documentNumber\":\"CN-001\"}")
+        );
+    }
+
+    @Test
+    void publish_usesDocumentIdAsPartitionKey() {
+        DebitCreditNoteProcessedDomainEvent domainEvent = DebitCreditNoteProcessedDomainEvent.of(
+            "doc-42", "DN-007", Money.of(BigDecimal.valueOf(500), "THB"), "saga-2", "corr-2"
+        );
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+
+        eventPublisher.publish(domainEvent);
+
+        ArgumentCaptor<String> partitionKeyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), any(), any(), partitionKeyCaptor.capture(), any());
+
+        assertEquals("doc-42", partitionKeyCaptor.getValue());
+    }
+
+    @Test
+    void publish_usesCorrectTopic() {
+        DebitCreditNoteProcessedDomainEvent domainEvent = DebitCreditNoteProcessedDomainEvent.of(
+            "doc-1", "CN-001", Money.of(BigDecimal.TEN, "THB"), "saga-1", "corr-1"
+        );
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+
+        eventPublisher.publish(domainEvent);
+
+        ArgumentCaptor<String> topicCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), any(), topicCaptor.capture(), any(), any());
+
+        assertEquals("debitcreditnote.processed", topicCaptor.getValue());
+    }
+
+    @Test
+    void publish_translatesMoneyFieldsToKafkaDto() {
+        DebitCreditNoteProcessedDomainEvent domainEvent = DebitCreditNoteProcessedDomainEvent.of(
+            "doc-1", "CN-001", Money.of(BigDecimal.valueOf(9999), "THB"), "saga-1", "corr-1"
+        );
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+
+        eventPublisher.publish(domainEvent);
+
+        ArgumentCaptor<DebitCreditNoteProcessedEvent> eventCaptor =
+            ArgumentCaptor.forClass(DebitCreditNoteProcessedEvent.class);
+        verify(outboxService).saveWithRouting(eventCaptor.capture(), any(), any(), any(), any(), any());
+
+        DebitCreditNoteProcessedEvent kafkaEvent = eventCaptor.getValue();
+        assertEquals("doc-1", kafkaEvent.getDocumentId());
+        assertEquals("CN-001", kafkaEvent.getDocumentNumber());
+        assertEquals(0, BigDecimal.valueOf(9999).compareTo(kafkaEvent.getTotal()));
+        assertEquals("THB", kafkaEvent.getCurrency());
+    }
+}
+```
+
+- [ ] **Step 2: Run test — verify it fails**
+
+```bash
+mvn test -Dtest=DebitCreditNoteEventPublisherTest -pl . 2>&1 | tail -10
+```
+Expected: compilation error — `DebitCreditNoteEventPublisher` does not exist.
+
+- [ ] **Step 3: Create DebitCreditNoteEventPublisher AND delete old EventPublisher**
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/DebitCreditNoteEventPublisher.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import com.wpanther.debitcreditnote.processing.application.dto.event.DebitCreditNoteProcessedEvent;
+import com.wpanther.debitcreditnote.processing.application.port.out.DebitCreditNoteEventPublishingPort;
+import com.wpanther.debitcreditnote.processing.domain.event.DebitCreditNoteProcessedDomainEvent;
+import com.wpanther.debitcreditnote.processing.infrastructure.config.KafkaTopicsProperties;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Map;
+
+@Component
+@Slf4j
+public class DebitCreditNoteEventPublisher implements DebitCreditNoteEventPublishingPort {
+
+    private final OutboxService outboxService;
+    private final HeaderSerializer headerSerializer;
+    private final String debitcreditnoteProcessedTopic;
+
+    @Autowired
+    public DebitCreditNoteEventPublisher(
+            OutboxService outboxService,
+            HeaderSerializer headerSerializer,
+            KafkaTopicsProperties topics) {
+        this(outboxService, headerSerializer, topics.debitcreditnoteProcessed());
+    }
+
+    DebitCreditNoteEventPublisher(OutboxService outboxService, HeaderSerializer headerSerializer,
+                                   String debitcreditnoteProcessedTopic) {
+        this.outboxService = outboxService;
+        this.headerSerializer = headerSerializer;
+        this.debitcreditnoteProcessedTopic = debitcreditnoteProcessedTopic;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publish(DebitCreditNoteProcessedDomainEvent domainEvent) {
+        DebitCreditNoteProcessedEvent kafkaEvent = new DebitCreditNoteProcessedEvent(
+            domainEvent.documentId(),
+            domainEvent.documentNumber(),
+            domainEvent.total().amount(),
+            domainEvent.total().currency(),
+            domainEvent.sagaId(),
+            domainEvent.correlationId()
+        );
+
+        Map<String, String> headers = Map.of(
+            "correlationId", domainEvent.correlationId(),
+            "documentNumber", domainEvent.documentNumber()
+        );
+
+        outboxService.saveWithRouting(
+            kafkaEvent,
+            "ProcessedDebitCreditNote",
+            domainEvent.documentId(),
+            debitcreditnoteProcessedTopic,
+            domainEvent.documentId(),
+            headerSerializer.toJson(headers)
+        );
+
+        log.info("Published DebitCreditNoteProcessedEvent to outbox: {}", domainEvent.documentNumber());
+    }
+}
+```
+
+Then delete the old file:
+```bash
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/EventPublisher.java
+```
+
+- [ ] **Step 4: Run test — verify it passes**
+
+```bash
+mvn test -Dtest=DebitCreditNoteEventPublisherTest -pl . 2>&1 | tail -10
+```
+Expected: `BUILD SUCCESS`, all 4 tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/DebitCreditNoteEventPublisher.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/messaging/DebitCreditNoteEventPublisherTest.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/EventPublisher.java
+git commit -m "Add DebitCreditNoteEventPublisher adapter (delete old EventPublisher)"
+```
+
+---
+
+## Task 13: DebitCreditNoteParserServiceImpl (parsing adapter with guards)
+
+**What:** Create `infrastructure/adapter/out/parsing/DebitCreditNoteParserServiceImpl` implementing `DebitCreditNoteParserPort`. Adds size check (500 KB), wall-clock timeout via virtual-thread executor, concurrency cap via `Semaphore`, and XXE-safe SAXParserFactory. Method renamed from `parseNote` to `parse`. Delete the old `infrastructure/service/DebitCreditNoteParserServiceImpl`. Write tests first.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/parsing/DebitCreditNoteParserServiceImpl.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/parsing/DebitCreditNoteParserServiceImplTest.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/service/DebitCreditNoteParserServiceImpl.java`
+
+- [ ] **Step 1: Write the failing tests**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/parsing/DebitCreditNoteParserServiceImplTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.parsing;
+
+import com.wpanther.debitcreditnote.processing.domain.port.out.DebitCreditNoteParserPort;
+import com.wpanther.debitcreditnote.processing.domain.model.ProcessedDebitCreditNote;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class DebitCreditNoteParserServiceImplTest {
+
+    private DebitCreditNoteParserServiceImpl parser;
+
+    @BeforeEach
+    void setUp() {
+        // Package-private constructor: 10-second timeout, single-threaded (no concurrency cap needed)
+        parser = new DebitCreditNoteParserServiceImpl(10, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void parse_nullContent_throwsParsingExceptionForEmpty() {
+        assertThatThrownBy(() -> parser.parse(null, "source-1"))
+            .isInstanceOf(DebitCreditNoteParserPort.ParsingException.class)
+            .hasMessageContaining("null or empty");
+    }
+
+    @Test
+    void parse_blankContent_throwsParsingExceptionForEmpty() {
+        assertThatThrownBy(() -> parser.parse("   ", "source-1"))
+            .isInstanceOf(DebitCreditNoteParserPort.ParsingException.class)
+            .hasMessageContaining("null or empty");
+    }
+
+    @Test
+    void parse_oversizedContent_throwsParsingExceptionForOversized() {
+        // Create a string > 500 KB
+        String oversized = "A".repeat(501 * 1024);
+
+        assertThatThrownBy(() -> parser.parse(oversized, "source-1"))
+            .isInstanceOf(DebitCreditNoteParserPort.ParsingException.class)
+            .hasMessageContaining("too large");
+    }
+
+    @Test
+    void parse_malformedXml_throwsParsingExceptionForUnmarshal() {
+        String malformed = "<not-valid-xml";
+
+        assertThatThrownBy(() -> parser.parse(malformed, "source-1"))
+            .isInstanceOf(DebitCreditNoteParserPort.ParsingException.class);
+    }
+
+    @Test
+    void parse_wrongRootElement_throwsParsingExceptionForUnexpectedRootElement() {
+        // Valid XML but wrong root element (not DebitCreditNote_CrossIndustryInvoice)
+        String wrongRoot = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Invoice></Invoice>";
+
+        assertThatThrownBy(() -> parser.parse(wrongRoot, "source-1"))
+            .isInstanceOf(DebitCreditNoteParserPort.ParsingException.class);
+    }
+
+    @Test
+    void parse_timeout_throwsParsingExceptionForTimeout() {
+        // Very short timeout to force a timeout on a large-enough (but valid-sized) input
+        DebitCreditNoteParserServiceImpl shortTimeoutParser =
+            new DebitCreditNoteParserServiceImpl(1, TimeUnit.MILLISECONDS);
+
+        // Use content near the size limit to make parsing slow enough to timeout
+        String content = "<?xml version=\"1.0\"?>" + "<x>".repeat(10000) + "</x>".repeat(10000);
+
+        assertThatThrownBy(() -> shortTimeoutParser.parse(content, "source-1"))
+            .isInstanceOf(DebitCreditNoteParserPort.ParsingException.class)
+            .hasMessageContaining("timed out");
+    }
+}
+```
+
+- [ ] **Step 2: Run tests — verify they fail**
+
+```bash
+mvn test -Dtest=DebitCreditNoteParserServiceImplTest -pl . 2>&1 | tail -10
+```
+Expected: compilation error — `DebitCreditNoteParserServiceImpl` in the new package does not exist.
+
+- [ ] **Step 3: Create the new parser impl AND delete the old one**
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/parsing/DebitCreditNoteParserServiceImpl.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.parsing;
+
+import com.wpanther.debitcreditnote.processing.domain.model.*;
+import com.wpanther.debitcreditnote.processing.domain.port.out.DebitCreditNoteParserPort;
+import com.wpanther.etax.generated.debitcreditnote.ram.*;
+import com.wpanther.etax.generated.debitcreditnote.rsm.DebitCreditNote_CrossIndustryInvoiceType;
+import jakarta.annotation.PreDestroy;
+import jakarta.xml.bind.JAXBContext;
+import jakarta.xml.bind.JAXBException;
+import jakarta.xml.bind.Unmarshaller;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.xml.sax.InputSource;
+
+import javax.xml.XMLConstants;
+import javax.xml.datatype.XMLGregorianCalendar;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.parsers.SAXParserFactory;
+import javax.xml.transform.sax.SAXSource;
+import java.io.StringReader;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+@Slf4j
+@Service
+public class DebitCreditNoteParserServiceImpl implements DebitCreditNoteParserPort {
+
+    static final int MAX_XML_BYTES = 500 * 1024; // 500 KB
+
+    private final JAXBContext jaxbContext;
+    private final SAXParserFactory saxParserFactory;
+    private final long parseTimeoutMs;
+    private final int defaultDueDateDays;
+    private final ExecutorService parseExecutor;
+    private final Semaphore parseSemaphore;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public DebitCreditNoteParserServiceImpl(
+            @Value("${app.parsing.timeout-seconds:10}") int parseTimeoutSeconds,
+            @Value("${app.parsing.max-concurrent:300}") int maxConcurrentParses,
+            @Value("${app.debitcreditnote.default-due-date-days:30}") int defaultDueDateDays) {
+        this(TimeUnit.SECONDS.toMillis(parseTimeoutSeconds), defaultDueDateDays, maxConcurrentParses);
+    }
+
+    DebitCreditNoteParserServiceImpl(long timeout, TimeUnit unit) {
+        this(unit.toMillis(timeout), 30, Integer.MAX_VALUE);
+    }
+
+    DebitCreditNoteParserServiceImpl(long timeout, TimeUnit unit, int defaultDueDateDays) {
+        this(unit.toMillis(timeout), defaultDueDateDays, Integer.MAX_VALUE);
+    }
+
+    DebitCreditNoteParserServiceImpl(long timeout, TimeUnit unit, int defaultDueDateDays, int maxConcurrentParses) {
+        this(unit.toMillis(timeout), defaultDueDateDays, maxConcurrentParses);
+    }
+
+    DebitCreditNoteParserServiceImpl() {
+        this(TimeUnit.SECONDS.toMillis(10), 30, Integer.MAX_VALUE);
+    }
+
+    private DebitCreditNoteParserServiceImpl(long parseTimeoutMs, int defaultDueDateDays, int maxConcurrentParses) {
+        this.parseTimeoutMs = parseTimeoutMs;
+        this.defaultDueDateDays = defaultDueDateDays;
+        this.parseSemaphore = new Semaphore(maxConcurrentParses);
+        this.parseExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+        try {
+            String contextPath = "com.wpanther.etax.generated.debitcreditnote.rsm.impl" +
+                               ":com.wpanther.etax.generated.debitcreditnote.ram.impl" +
+                               ":com.wpanther.etax.generated.common.qdt.impl" +
+                               ":com.wpanther.etax.generated.common.udt.impl";
+            this.jaxbContext = JAXBContext.newInstance(contextPath);
+            log.info("JAXB context initialized successfully for Thai e-Tax debit/credit note parsing");
+        } catch (JAXBException e) {
+            log.error("Failed to initialize JAXB context", e);
+            throw new IllegalStateException("Failed to initialize XML parser", e);
+        }
+
+        try {
+            SAXParserFactory factory = SAXParserFactory.newInstance();
+            factory.setNamespaceAware(true);
+            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            this.saxParserFactory = factory;
+        } catch (ParserConfigurationException | org.xml.sax.SAXException e) {
+            throw new IllegalStateException("Failed to initialize secure SAX parser factory", e);
+        }
+    }
+
+    @PreDestroy
+    public void shutdownExecutor() {
+        parseExecutor.shutdown();
+    }
+
+    @Override
+    public ProcessedDebitCreditNote parse(String xmlContent, String sourceNoteId)
+            throws DebitCreditNoteParserPort.ParsingException {
+
+        log.debug("Starting XML parsing for source note ID: {}", sourceNoteId);
+
+        try {
+            DebitCreditNote_CrossIndustryInvoiceType jaxbNote = unmarshalXml(xmlContent);
+
+            ExchangedDocumentType document = jaxbNote.getExchangedDocument();
+            if (document == null) {
+                throw new ParsingException("DebitCreditNote XML missing required ExchangedDocument element");
+            }
+
+            SupplyChainTradeTransactionType transaction = jaxbNote.getSupplyChainTradeTransaction();
+            if (transaction == null) {
+                throw new ParsingException("DebitCreditNote XML missing required SupplyChainTradeTransaction element");
+            }
+
+            LocalDate issueDate = extractIssueDate(document);
+            String currency = extractCurrency(transaction);
+
+            ProcessedDebitCreditNote note = ProcessedDebitCreditNote.builder()
+                .id(DebitCreditNoteId.generate())
+                .sourceNoteId(sourceNoteId)
+                .noteNumber(extractNoteNumber(document))
+                .noteType(extractNoteType(document))
+                .issueDate(issueDate)
+                .dueDate(extractDueDate(transaction, issueDate))
+                .seller(extractSeller(transaction))
+                .buyer(extractBuyer(transaction))
+                .items(extractLineItems(transaction, currency))
+                .currency(currency)
+                .originalXml(xmlContent)
+                .build();
+
+            log.info("Successfully parsed debit/credit note {} with {} line items",
+                note.getNoteNumber(), note.getItems().size());
+
+            return note;
+
+        } catch (ParsingException e) {
+            log.error("Failed to parse debit/credit note XML for source ID {}: {}", sourceNoteId, e.getMessage());
+            throw e;
+        }
+    }
+
+    private DebitCreditNote_CrossIndustryInvoiceType unmarshalXml(String xmlContent)
+            throws ParsingException {
+
+        if (xmlContent == null || xmlContent.isBlank()) {
+            throw ParsingException.forEmpty();
+        }
+
+        int byteSize = xmlContent.getBytes(StandardCharsets.UTF_8).length;
+        if (byteSize > MAX_XML_BYTES) {
+            throw ParsingException.forOversized(byteSize, MAX_XML_BYTES);
+        }
+
+        try {
+            parseSemaphore.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw ParsingException.forInterrupted();
+        }
+
+        try {
+            Future<DebitCreditNote_CrossIndustryInvoiceType> future = parseExecutor.submit(() -> doUnmarshal(xmlContent));
+            return future.get(parseTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            throw ParsingException.forTimeout(parseTimeoutMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw ParsingException.forInterrupted();
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof ParsingException pe) throw pe;
+            throw ParsingException.forUnmarshal(cause != null ? cause : e);
+        } finally {
+            parseSemaphore.release();
+        }
+    }
+
+    private DebitCreditNote_CrossIndustryInvoiceType doUnmarshal(String xmlContent) throws ParsingException {
+        try {
+            Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
+            InputSource inputSource = new InputSource(new StringReader(xmlContent));
+            SAXSource saxSource = new SAXSource(saxParserFactory.newSAXParser().getXMLReader(), inputSource);
+            Object result = unmarshaller.unmarshal(saxSource);
+
+            if (result instanceof DebitCreditNote_CrossIndustryInvoiceType note) {
+                return note;
+            }
+            throw ParsingException.forUnexpectedRootElement(result == null ? "null" : result.getClass().getName());
+        } catch (ParsingException e) {
+            throw e;
+        } catch (Exception e) {
+            throw ParsingException.forUnmarshal(e);
+        }
+    }
+
+    // ---- Extraction helpers (adapted from old DebitCreditNoteParserServiceImpl) ----
+
+    private String extractNoteNumber(ExchangedDocumentType document) {
+        return Optional.ofNullable(document.getID())
+            .map(id -> id.getValue())
+            .orElse("UNKNOWN");
+    }
+
+    private String extractNoteType(ExchangedDocumentType document) {
+        return Optional.ofNullable(document.getTypeCode())
+            .map(code -> code.getValue())
+            .orElse("UNKNOWN");
+    }
+
+    private LocalDate extractIssueDate(ExchangedDocumentType document) {
+        return Optional.ofNullable(document.getIssueDateTime())
+            .map(dt -> dt.getDateTimeString())
+            .map(dts -> dts.getValue())
+            .map(this::parseDate)
+            .orElse(LocalDate.now());
+    }
+
+    private LocalDate parseDate(String dateStr) {
+        try {
+            return LocalDate.parse(dateStr.substring(0, 8),
+                java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
+        } catch (Exception e) {
+            return LocalDate.now();
+        }
+    }
+
+    private String extractCurrency(SupplyChainTradeTransactionType transaction) {
+        return Optional.ofNullable(transaction.getApplicableHeaderTradeSettlement())
+            .map(HeaderTradeSettlementType::getInvoiceCurrencyCode)
+            .map(code -> code.getValue())
+            .orElse("THB");
+    }
+
+    private LocalDate extractDueDate(SupplyChainTradeTransactionType transaction, LocalDate issueDate) {
+        return Optional.ofNullable(transaction.getApplicableHeaderTradeSettlement())
+            .map(HeaderTradeSettlementType::getSpecifiedTradePaymentTerms)
+            .filter(terms -> !terms.isEmpty())
+            .map(terms -> terms.get(0))
+            .map(TradePaymentTermsType::getDueDateDateTime)
+            .map(dt -> dt.getDateTimeString())
+            .map(dts -> dts.getValue())
+            .map(this::parseDate)
+            .orElse(issueDate.plusDays(defaultDueDateDays));
+    }
+
+    private Party extractSeller(SupplyChainTradeTransactionType transaction) {
+        return Optional.ofNullable(transaction.getApplicableHeaderTradeAgreement())
+            .map(HeaderTradeAgreementType::getSellerTradeParty)
+            .map(this::toParty)
+            .orElseThrow(() -> new IllegalStateException("Seller not found in XML"));
+    }
+
+    private Party extractBuyer(SupplyChainTradeTransactionType transaction) {
+        return Optional.ofNullable(transaction.getApplicableHeaderTradeAgreement())
+            .map(HeaderTradeAgreementType::getBuyerTradeParty)
+            .map(this::toParty)
+            .orElseThrow(() -> new IllegalStateException("Buyer not found in XML"));
+    }
+
+    private Party toParty(TradePartyType tradeParty) {
+        String name = Optional.ofNullable(tradeParty.getName())
+            .map(n -> n.getValue()).orElse("");
+
+        String taxId = Optional.ofNullable(tradeParty.getSpecifiedTaxRegistration())
+            .filter(list -> !list.isEmpty())
+            .map(list -> list.get(0))
+            .map(TaxRegistrationType::getID)
+            .map(id -> id.getValue()).orElse("");
+
+        String taxScheme = Optional.ofNullable(tradeParty.getSpecifiedTaxRegistration())
+            .filter(list -> !list.isEmpty())
+            .map(list -> list.get(0))
+            .map(TaxRegistrationType::getID)
+            .map(id -> id.getSchemeID()).orElse("VAT");
+
+        String email = Optional.ofNullable(tradeParty.getDefinedTradeContact())
+            .filter(list -> !list.isEmpty())
+            .map(list -> list.get(0))
+            .map(TradeContactType::getEmailURIUniversalCommunication)
+            .map(comm -> comm.getURIID())
+            .map(id -> id.getValue()).orElse(null);
+
+        TradeAddressType address = Optional.ofNullable(tradeParty.getPostalTradeAddress()).orElse(null);
+        String street = address != null && address.getLineOne() != null ? address.getLineOne().getValue() : "";
+        String city = address != null && address.getCityName() != null ? address.getCityName().getValue() : "";
+        String postalCode = address != null && address.getPostcodeCode() != null ? address.getPostcodeCode().getValue() : "";
+        String country = address != null && address.getCountryID() != null ? address.getCountryID().getValue() : "TH";
+
+        return Party.of(name, TaxIdentifier.of(taxId, taxScheme),
+            Address.of(street, city, postalCode, country), email);
+    }
+
+    private List<LineItem> extractLineItems(SupplyChainTradeTransactionType transaction, String currency) {
+        List<LineItem> items = new ArrayList<>();
+        List<SupplyChainTradeLineItemType> lineItems = transaction.getIncludedSupplyChainTradeLineItem();
+        if (lineItems == null) return items;
+
+        for (SupplyChainTradeLineItemType lineItem : lineItems) {
+            try {
+                String description = Optional.ofNullable(lineItem.getSpecifiedTradeProduct())
+                    .map(TradeProductType::getName)
+                    .filter(list -> !list.isEmpty())
+                    .map(list -> list.get(0))
+                    .map(n -> n.getValue()).orElse("Unknown");
+
+                int quantity = Optional.ofNullable(lineItem.getSpecifiedLineTradeDelivery())
+                    .map(LineTradeDeliveryType::getBilledQuantity)
+                    .map(q -> q.getValue())
+                    .map(BigDecimal::intValue).orElse(1);
+
+                BigDecimal unitPrice = Optional.ofNullable(lineItem.getSpecifiedLineTradeAgreement())
+                    .map(LineTradeAgreementType::getNetPriceProductTradePrice)
+                    .map(TradePriceType::getChargeAmount)
+                    .filter(list -> !list.isEmpty())
+                    .map(list -> list.get(0))
+                    .map(amt -> amt.getValue()).orElse(BigDecimal.ZERO);
+
+                BigDecimal taxRate = Optional.ofNullable(lineItem.getSpecifiedLineTradeSettlement())
+                    .map(LineTradeSettlementType::getApplicableTradeTax)
+                    .filter(list -> !list.isEmpty())
+                    .map(list -> list.get(0))
+                    .map(TradeTaxType::getRateApplicablePercent)
+                    .map(pct -> pct.getValue()).orElse(BigDecimal.valueOf(7));
+
+                items.add(new LineItem(description, quantity, Money.of(unitPrice, currency), taxRate));
+            } catch (Exception e) {
+                log.warn("Failed to parse line item: {}", e.getMessage());
+            }
+        }
+        return items;
+    }
+}
+```
+
+Then delete the old file:
+```bash
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/service/DebitCreditNoteParserServiceImpl.java
+```
+
+- [ ] **Step 4: Run tests — verify they pass**
+
+```bash
+mvn test -Dtest=DebitCreditNoteParserServiceImplTest -pl . 2>&1 | tail -15
+```
+Expected: `BUILD SUCCESS`. The `parse_timeout` test may be flaky if the JVM is under load — if so, increase the delay or skip it and add `@Disabled("flaky on slow CI")`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/parsing/DebitCreditNoteParserServiceImpl.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/parsing/DebitCreditNoteParserServiceImplTest.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/service/DebitCreditNoteParserServiceImpl.java
+git commit -m "Add DebitCreditNoteParserServiceImpl adapter with size/timeout/concurrency guards (delete old impl)"
+```
+
+---
+
+## Task 14: Persistence entities and mapper (move to adapter/out/persistence/)
+
+**What:** Copy the three JPA entity classes and the mapper to `infrastructure/adapter/out/persistence/`, updating package declarations. Delete the old files at `infrastructure/persistence/` in the same commit to avoid dual `@Entity` registration on the same table. Write entity tests.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteEntity.java`
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNotePartyEntity.java`
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNoteLineItemEntity.java`
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteMapper.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteEntityTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNotePartyEntityTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNoteLineItemEntityTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteMapperTest.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteEntity.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/DebitCreditNotePartyEntity.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/DebitCreditNoteLineItemEntity.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteMapper.java`
+
+**Note:** The old `ProcessedDebitCreditNoteRepositoryImpl` and `JpaProcessedDebitCreditNoteRepository` still reference the old package. They will fail to compile once the old entity classes are deleted. This is expected — they will be replaced in Task 15. Run `mvn test -Dtest=ProcessedDebitCreditNoteEntityTest,...` (specific tests only, not full build) until Task 15 is done.
+
+- [ ] **Step 1: Write the entity tests**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteEntityTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import com.wpanther.debitcreditnote.processing.domain.model.ProcessingStatus;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class ProcessedDebitCreditNoteEntityTest {
+
+    @Test
+    void prePersist_generatesIdWhenNull() {
+        ProcessedDebitCreditNoteEntity entity = new ProcessedDebitCreditNoteEntity();
+        entity.onCreate();
+        assertThat(entity.getId()).isNotNull();
+    }
+
+    @Test
+    void prePersist_doesNotOverwriteExistingId() {
+        UUID existingId = UUID.randomUUID();
+        ProcessedDebitCreditNoteEntity entity = ProcessedDebitCreditNoteEntity.builder()
+            .id(existingId)
+            .build();
+        entity.onCreate();
+        assertThat(entity.getId()).isEqualTo(existingId);
+    }
+
+    @Test
+    void addParty_linksBidirectionally() {
+        ProcessedDebitCreditNoteEntity note = ProcessedDebitCreditNoteEntity.builder()
+            .id(UUID.randomUUID())
+            .sourceNoteId("src-1")
+            .noteNumber("CN-001")
+            .noteType("380")
+            .issueDate(LocalDate.now())
+            .dueDate(LocalDate.now().plusDays(30))
+            .currency("THB")
+            .subtotal(BigDecimal.valueOf(1000))
+            .totalTax(BigDecimal.valueOf(70))
+            .total(BigDecimal.valueOf(1070))
+            .originalXml("<xml/>")
+            .status(ProcessingStatus.PENDING)
+            .build();
+
+        DebitCreditNotePartyEntity party = new DebitCreditNotePartyEntity();
+        note.addParty(party);
+
+        assertThat(note.getParties()).contains(party);
+        assertThat(party.getNote()).isEqualTo(note);
+    }
+}
+```
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNotePartyEntityTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class DebitCreditNotePartyEntityTest {
+
+    @Test
+    void prePersist_generatesIdWhenNull() {
+        DebitCreditNotePartyEntity entity = new DebitCreditNotePartyEntity();
+        entity.onCreate();
+        assertThat(entity.getId()).isNotNull();
+        assertThat(entity.getCreatedAt()).isNotNull();
+    }
+
+    @Test
+    void prePersist_doesNotOverwriteExistingId() {
+        UUID existingId = UUID.randomUUID();
+        DebitCreditNotePartyEntity entity = DebitCreditNotePartyEntity.builder().id(existingId).build();
+        entity.onCreate();
+        assertThat(entity.getId()).isEqualTo(existingId);
+    }
+}
+```
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNoteLineItemEntityTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class DebitCreditNoteLineItemEntityTest {
+
+    @Test
+    void prePersist_generatesIdWhenNull() {
+        DebitCreditNoteLineItemEntity entity = new DebitCreditNoteLineItemEntity();
+        entity.onCreate();
+        assertThat(entity.getId()).isNotNull();
+        assertThat(entity.getCreatedAt()).isNotNull();
+    }
+
+    @Test
+    void prePersist_doesNotOverwriteExistingId() {
+        UUID existingId = UUID.randomUUID();
+        DebitCreditNoteLineItemEntity entity = DebitCreditNoteLineItemEntity.builder().id(existingId).build();
+        entity.onCreate();
+        assertThat(entity.getId()).isEqualTo(existingId);
+    }
+}
+```
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteMapperTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import com.wpanther.debitcreditnote.processing.domain.model.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class ProcessedDebitCreditNoteMapperTest {
+
+    private ProcessedDebitCreditNoteMapper mapper;
+
+    @BeforeEach
+    void setUp() {
+        mapper = new ProcessedDebitCreditNoteMapper();
+    }
+
+    @Test
+    void toEntity_andToDomain_roundTrip_preservesNoteNumber() {
+        Party seller = Party.of("Seller Co", TaxIdentifier.of("1234567890123", "VAT"),
+            Address.of("123 Main St", "Bangkok", "10110", "TH"), "seller@example.com");
+        Party buyer = Party.of("Buyer Co", TaxIdentifier.of("9876543210987", "VAT"),
+            Address.of("456 Side St", "Bangkok", "10120", "TH"), "buyer@example.com");
+
+        ProcessedDebitCreditNote original = ProcessedDebitCreditNote.builder()
+            .id(DebitCreditNoteId.generate())
+            .sourceNoteId("src-1")
+            .noteNumber("CN-001")
+            .noteType("380")
+            .issueDate(LocalDate.of(2026, 4, 27))
+            .dueDate(LocalDate.of(2026, 5, 27))
+            .seller(seller)
+            .buyer(buyer)
+            .items(List.of())
+            .currency("THB")
+            .originalXml("<xml/>")
+            .status(ProcessingStatus.COMPLETED)
+            .build();
+
+        ProcessedDebitCreditNoteEntity entity = mapper.toEntity(original);
+        ProcessedDebitCreditNote restored = mapper.toDomain(entity);
+
+        assertThat(restored.getNoteNumber()).isEqualTo("CN-001");
+        assertThat(restored.getSourceNoteId()).isEqualTo("src-1");
+        assertThat(restored.getStatus()).isEqualTo(ProcessingStatus.COMPLETED);
+    }
+}
+```
+
+- [ ] **Step 2: Run the new-location tests — verify they fail**
+
+```bash
+mvn test -Dtest="ProcessedDebitCreditNoteEntityTest,DebitCreditNotePartyEntityTest,DebitCreditNoteLineItemEntityTest,ProcessedDebitCreditNoteMapperTest" -pl . 2>&1 | tail -10
+```
+Expected: compilation error — classes do not exist in new package yet.
+
+- [ ] **Step 3: Create entities and mapper in new location, delete old files**
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteEntity.java` — same content as the old file but change the package declaration to `infrastructure.adapter.out.persistence` and update cross-references within the same file:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import com.wpanther.debitcreditnote.processing.domain.model.ProcessingStatus;
+import jakarta.persistence.*;
+import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.UpdateTimestamp;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.*;
+
+@Entity
+@Table(name = "processed_debit_credit_notes", indexes = {
+    @Index(name = "idx_note_number", columnList = "note_number"),
+    @Index(name = "idx_source_note_id", columnList = "source_note_id"),
+    @Index(name = "idx_status", columnList = "status"),
+    @Index(name = "idx_issue_date", columnList = "issue_date")
+})
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class ProcessedDebitCreditNoteEntity {
+
+    @Id
+    @Column(name = "id", nullable = false)
+    private UUID id;
+
+    @Column(name = "source_note_id", nullable = false, length = 100)
+    private String sourceNoteId;
+
+    @Column(name = "note_number", nullable = false, length = 50)
+    private String noteNumber;
+
+    @Column(name = "note_type", nullable = false, length = 20)
+    private String noteType;
+
+    @Column(name = "issue_date", nullable = false)
+    private LocalDate issueDate;
+
+    @Column(name = "due_date", nullable = false)
+    private LocalDate dueDate;
+
+    @Column(name = "currency", nullable = false, length = 3)
+    private String currency;
+
+    @Column(name = "subtotal", nullable = false, precision = 15, scale = 2)
+    private BigDecimal subtotal;
+
+    @Column(name = "total_tax", nullable = false, precision = 15, scale = 2)
+    private BigDecimal totalTax;
+
+    @Column(name = "total", nullable = false, precision = 15, scale = 2)
+    private BigDecimal total;
+
+    @Column(name = "original_xml", nullable = false, columnDefinition = "TEXT")
+    private String originalXml;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false, length = 20)
+    private ProcessingStatus status;
+
+    @Column(name = "error_message", columnDefinition = "TEXT")
+    private String errorMessage;
+
+    @CreationTimestamp
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "completed_at")
+    private LocalDateTime completedAt;
+
+    @UpdateTimestamp
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt;
+
+    @OneToMany(mappedBy = "note", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @Builder.Default
+    private Set<DebitCreditNotePartyEntity> parties = new HashSet<>();
+
+    @OneToMany(mappedBy = "note", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @OrderBy("lineNumber ASC")
+    @Builder.Default
+    private List<DebitCreditNoteLineItemEntity> lineItems = new ArrayList<>();
+
+    public void addParty(DebitCreditNotePartyEntity party) {
+        parties.add(party);
+        party.setNote(this);
+    }
+
+    public void addLineItem(DebitCreditNoteLineItemEntity lineItem) {
+        lineItems.add(lineItem);
+        lineItem.setNote(this);
+    }
+
+    @PrePersist
+    protected void onCreate() {
+        if (id == null) {
+            id = UUID.randomUUID();
+        }
+    }
+}
+```
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNotePartyEntity.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.util.UUID;
+
+@Entity
+@Table(name = "debit_credit_note_parties", indexes = {
+    @Index(name = "idx_party_note_id", columnList = "note_id"),
+    @Index(name = "idx_party_type", columnList = "party_type")
+})
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class DebitCreditNotePartyEntity {
+
+    @Id
+    @Column(name = "id", nullable = false)
+    private UUID id;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "note_id", nullable = false, foreignKey = @ForeignKey(name = "fk_party_note"))
+    private ProcessedDebitCreditNoteEntity note;
+
+    @Column(name = "party_type", nullable = false, length = 20)
+    private String partyType;
+
+    @Column(name = "name", nullable = false, length = 255)
+    private String name;
+
+    @Column(name = "tax_id", nullable = false, length = 50)
+    private String taxId;
+
+    @Column(name = "tax_scheme", nullable = false, length = 20)
+    private String taxScheme;
+
+    @Column(name = "email", length = 255)
+    private String email;
+
+    @Column(name = "street_address", length = 500)
+    private String streetAddress;
+
+    @Column(name = "city", length = 100)
+    private String city;
+
+    @Column(name = "postal_code", length = 20)
+    private String postalCode;
+
+    @Column(name = "country", nullable = false, length = 3)
+    private String country;
+
+    @Column(name = "created_at", nullable = false)
+    private java.time.LocalDateTime createdAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (id == null) {
+            id = UUID.randomUUID();
+        }
+        if (createdAt == null) {
+            createdAt = java.time.LocalDateTime.now();
+        }
+    }
+}
+```
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNoteLineItemEntity.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.UUID;
+
+@Entity
+@Table(name = "debit_credit_note_line_items",
+       uniqueConstraints = @UniqueConstraint(columnNames = {"note_id", "line_number"}),
+       indexes = {
+           @Index(name = "idx_line_note_id", columnList = "note_id")
+       })
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class DebitCreditNoteLineItemEntity {
+
+    @Id
+    @Column(name = "id", nullable = false)
+    private UUID id;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "note_id", nullable = false, foreignKey = @ForeignKey(name = "fk_lineitem_note"))
+    private ProcessedDebitCreditNoteEntity note;
+
+    @Column(name = "line_number", nullable = false)
+    private Integer lineNumber;
+
+    @Column(name = "description", nullable = false, length = 1000)
+    private String description;
+
+    @Column(name = "quantity", nullable = false)
+    private Integer quantity;
+
+    @Column(name = "unit_price", nullable = false, precision = 15, scale = 2)
+    private BigDecimal unitPrice;
+
+    @Column(name = "tax_rate", nullable = false, precision = 5, scale = 2)
+    private BigDecimal taxRate;
+
+    @Column(name = "line_total", nullable = false, precision = 15, scale = 2)
+    private BigDecimal lineTotal;
+
+    @Column(name = "tax_amount", nullable = false, precision = 15, scale = 2)
+    private BigDecimal taxAmount;
+
+    @Column(name = "total_with_tax", nullable = false, precision = 15, scale = 2)
+    private BigDecimal totalWithTax;
+
+    @Column(name = "created_at", nullable = false)
+    private LocalDateTime createdAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (id == null) {
+            id = UUID.randomUUID();
+        }
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+    }
+}
+```
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteMapper.java` — same content as old file, new package, updated imports:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import com.wpanther.debitcreditnote.processing.domain.model.*;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.util.Set;
+import java.util.stream.Collectors;
+
+@Component
+@Slf4j
+public class ProcessedDebitCreditNoteMapper {
+
+    public ProcessedDebitCreditNoteEntity toEntity(ProcessedDebitCreditNote domain) {
+        ProcessedDebitCreditNoteEntity entity = ProcessedDebitCreditNoteEntity.builder()
+                .id(domain.getId().getValue())
+                .sourceNoteId(domain.getSourceNoteId())
+                .noteNumber(domain.getNoteNumber())
+                .noteType(domain.getNoteType())
+                .issueDate(domain.getIssueDate())
+                .dueDate(domain.getDueDate())
+                .currency(domain.getCurrency())
+                .subtotal(domain.getSubtotal().amount())
+                .totalTax(domain.getTotalTax().amount())
+                .total(domain.getTotal().amount())
+                .originalXml(domain.getOriginalXml())
+                .status(domain.getStatus())
+                .errorMessage(domain.getErrorMessage())
+                .createdAt(domain.getCreatedAt())
+                .completedAt(domain.getCompletedAt())
+                .build();
+
+        entity.addParty(toPartyEntity(domain.getSeller(), "SELLER", entity));
+        entity.addParty(toPartyEntity(domain.getBuyer(), "BUYER", entity));
+
+        int lineNumber = 1;
+        for (LineItem item : domain.getItems()) {
+            entity.addLineItem(toLineItemEntity(item, lineNumber++, entity));
+        }
+
+        return entity;
+    }
+
+    public ProcessedDebitCreditNote toDomain(ProcessedDebitCreditNoteEntity entity) {
+        Set<Party> parties = entity.getParties().stream()
+                .map(this::toDomainParty)
+                .collect(Collectors.toSet());
+
+        Party seller = parties.stream()
+                .filter(p -> "SELLER".equals(getPartyType(entity, p)))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Seller not found"));
+
+        Party buyer = parties.stream()
+                .filter(p -> "BUYER".equals(getPartyType(entity, p)))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Buyer not found"));
+
+        return ProcessedDebitCreditNote.builder()
+                .id(DebitCreditNoteId.of(entity.getId()))
+                .sourceNoteId(entity.getSourceNoteId())
+                .noteNumber(entity.getNoteNumber())
+                .noteType(entity.getNoteType())
+                .issueDate(entity.getIssueDate())
+                .dueDate(entity.getDueDate())
+                .seller(seller)
+                .buyer(buyer)
+                .items(entity.getLineItems().stream()
+                        .map(this::toDomainLineItem)
+                        .collect(Collectors.toList()))
+                .currency(entity.getCurrency())
+                .originalXml(entity.getOriginalXml())
+                .status(entity.getStatus())
+                .createdAt(entity.getCreatedAt())
+                .completedAt(entity.getCompletedAt())
+                .errorMessage(entity.getErrorMessage())
+                .build();
+    }
+
+    private DebitCreditNotePartyEntity toPartyEntity(Party domain, String partyType,
+                                                      ProcessedDebitCreditNoteEntity noteEntity) {
+        return DebitCreditNotePartyEntity.builder()
+                .partyType(partyType)
+                .name(domain.name())
+                .taxId(domain.taxIdentifier().taxId())
+                .taxScheme(domain.taxIdentifier().scheme())
+                .email(domain.email())
+                .streetAddress(domain.address().street())
+                .city(domain.address().city())
+                .postalCode(domain.address().postalCode())
+                .country(domain.address().country())
+                .note(noteEntity)
+                .build();
+    }
+
+    private DebitCreditNoteLineItemEntity toLineItemEntity(LineItem domain, int lineNumber,
+                                                            ProcessedDebitCreditNoteEntity noteEntity) {
+        return DebitCreditNoteLineItemEntity.builder()
+                .lineNumber(lineNumber)
+                .description(domain.description())
+                .quantity(domain.quantity())
+                .unitPrice(domain.unitPrice().amount())
+                .taxRate(domain.taxRate())
+                .lineTotal(domain.getLineTotal().amount())
+                .taxAmount(domain.getTaxAmount().amount())
+                .totalWithTax(domain.getTotalWithTax().amount())
+                .note(noteEntity)
+                .build();
+    }
+
+    private Party toDomainParty(DebitCreditNotePartyEntity entity) {
+        return Party.of(
+                entity.getName(),
+                TaxIdentifier.of(entity.getTaxId(), entity.getTaxScheme()),
+                Address.of(entity.getStreetAddress(), entity.getCity(),
+                           entity.getPostalCode(), entity.getCountry()),
+                entity.getEmail()
+        );
+    }
+
+    private LineItem toDomainLineItem(DebitCreditNoteLineItemEntity entity) {
+        return new LineItem(
+                entity.getDescription(),
+                entity.getQuantity(),
+                Money.of(entity.getUnitPrice(), "THB"),
+                entity.getTaxRate()
+        );
+    }
+
+    private String getPartyType(ProcessedDebitCreditNoteEntity noteEntity, Party party) {
+        return noteEntity.getParties().stream()
+                .filter(pe -> pe.getName().equals(party.name()))
+                .findFirst()
+                .map(DebitCreditNotePartyEntity::getPartyType)
+                .orElse("UNKNOWN");
+    }
+}
+```
+
+Delete old files:
+```bash
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteEntity.java
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/DebitCreditNotePartyEntity.java
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/DebitCreditNoteLineItemEntity.java
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteMapper.java
+```
+
+- [ ] **Step 4: Run entity/mapper tests only — verify they pass**
+
+```bash
+mvn test -Dtest="ProcessedDebitCreditNoteEntityTest,DebitCreditNotePartyEntityTest,DebitCreditNoteLineItemEntityTest,ProcessedDebitCreditNoteMapperTest" -pl . 2>&1 | tail -10
+```
+Expected: `BUILD SUCCESS` for these specific tests. Full `mvn verify` will still fail because `ProcessedDebitCreditNoteRepositoryImpl` still imports from the old package — that is expected and fixed in Task 15.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteEntity.java \
+        src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNotePartyEntity.java \
+        src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNoteLineItemEntity.java \
+        src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteMapper.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteEntityTest.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNotePartyEntityTest.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/DebitCreditNoteLineItemEntityTest.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteMapperTest.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteEntity.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/DebitCreditNotePartyEntity.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/DebitCreditNoteLineItemEntity.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteMapper.java
+git commit -m "Move JPA entities and mapper to adapter/out/persistence/ (delete old persistence/ files)"
+```
+
+---
+
+## Task 15: Repository impl and JPA interface (move and trim)
+
+**What:** Create the trimmed `ProcessedDebitCreditNoteRepositoryImpl` and `JpaProcessedDebitCreditNoteRepository` in `infrastructure/adapter/out/persistence/`. Remove the 3 extra methods (`findByIdWithDetails`, `findByStatusWithDetails`, `existsBySourceNoteId`) to match the 5-method port contract. Delete the old files. Write a repository impl test.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteRepositoryImpl.java`
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/JpaProcessedDebitCreditNoteRepository.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteRepositoryImplTest.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteRepositoryImpl.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/JpaProcessedDebitCreditNoteRepository.java`
+
+- [ ] **Step 1: Write the failing test**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteRepositoryImplTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import com.wpanther.debitcreditnote.processing.domain.model.*;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.time.LocalDate;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class ProcessedDebitCreditNoteRepositoryImplTest {
+
+    @Mock
+    private JpaProcessedDebitCreditNoteRepository jpaRepository;
+
+    @Mock
+    private ProcessedDebitCreditNoteMapper mapper;
+
+    @InjectMocks
+    private ProcessedDebitCreditNoteRepositoryImpl repository;
+
+    @Test
+    void save_mapsAndDelegatesAndReturnsResult() {
+        ProcessedDebitCreditNote domain = buildMinimalDomainNote();
+        ProcessedDebitCreditNoteEntity entity = new ProcessedDebitCreditNoteEntity();
+        when(mapper.toEntity(domain)).thenReturn(entity);
+        when(jpaRepository.save(entity)).thenReturn(entity);
+        when(mapper.toDomain(entity)).thenReturn(domain);
+
+        ProcessedDebitCreditNote result = repository.save(domain);
+
+        assertThat(result).isSameAs(domain);
+        verify(jpaRepository).save(entity);
+    }
+
+    @Test
+    void findBySourceNoteId_returnsEmptyWhenNotFound() {
+        when(jpaRepository.findBySourceNoteId("missing")).thenReturn(Optional.empty());
+
+        Optional<ProcessedDebitCreditNote> result = repository.findBySourceNoteId("missing");
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void findBySourceNoteId_returnsMappedDomainWhenFound() {
+        ProcessedDebitCreditNoteEntity entity = new ProcessedDebitCreditNoteEntity();
+        ProcessedDebitCreditNote domain = buildMinimalDomainNote();
+        when(jpaRepository.findBySourceNoteId("src-1")).thenReturn(Optional.of(entity));
+        when(mapper.toDomain(entity)).thenReturn(domain);
+
+        Optional<ProcessedDebitCreditNote> result = repository.findBySourceNoteId("src-1");
+
+        assertThat(result).contains(domain);
+    }
+
+    @Test
+    void deleteById_delegatesToJpaRepository() {
+        UUID id = UUID.randomUUID();
+        DebitCreditNoteId noteId = DebitCreditNoteId.of(id);
+
+        repository.deleteById(noteId);
+
+        verify(jpaRepository).deleteById(id);
+    }
+
+    private ProcessedDebitCreditNote buildMinimalDomainNote() {
+        return ProcessedDebitCreditNote.builder()
+            .id(DebitCreditNoteId.generate())
+            .sourceNoteId("src-1")
+            .noteNumber("CN-001")
+            .noteType("380")
+            .issueDate(LocalDate.now())
+            .dueDate(LocalDate.now().plusDays(30))
+            .seller(Party.of("Seller", TaxIdentifier.of("1234567890123", "VAT"),
+                Address.of("St", "City", "10000", "TH"), null))
+            .buyer(Party.of("Buyer", TaxIdentifier.of("9876543210987", "VAT"),
+                Address.of("St", "City", "10000", "TH"), null))
+            .items(java.util.List.of())
+            .currency("THB")
+            .originalXml("<xml/>")
+            .status(ProcessingStatus.PENDING)
+            .build();
+    }
+}
+```
+
+- [ ] **Step 2: Run test — verify it fails**
+
+```bash
+mvn test -Dtest=ProcessedDebitCreditNoteRepositoryImplTest -pl . 2>&1 | tail -10
+```
+Expected: compilation error — new `ProcessedDebitCreditNoteRepositoryImpl` does not exist.
+
+- [ ] **Step 3: Create trimmed repository impl and JPA interface, delete old files**
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/JpaProcessedDebitCreditNoteRepository.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+import java.util.Optional;
+import java.util.UUID;
+
+public interface JpaProcessedDebitCreditNoteRepository
+        extends JpaRepository<ProcessedDebitCreditNoteEntity, UUID> {
+
+    @Query("SELECT n FROM ProcessedDebitCreditNoteEntity n WHERE n.noteNumber = :noteNumber")
+    Optional<ProcessedDebitCreditNoteEntity> findByNoteNumber(@Param("noteNumber") String noteNumber);
+
+    @Query("SELECT n FROM ProcessedDebitCreditNoteEntity n WHERE n.sourceNoteId = :sourceNoteId")
+    Optional<ProcessedDebitCreditNoteEntity> findBySourceNoteId(@Param("sourceNoteId") String sourceNoteId);
+
+    void deleteById(UUID id);
+}
+```
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteRepositoryImpl.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence;
+
+import com.wpanther.debitcreditnote.processing.domain.model.DebitCreditNoteId;
+import com.wpanther.debitcreditnote.processing.domain.model.ProcessedDebitCreditNote;
+import com.wpanther.debitcreditnote.processing.domain.port.out.ProcessedDebitCreditNoteRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Repository;
+
+import java.util.Optional;
+
+@Repository
+@RequiredArgsConstructor
+@Slf4j
+public class ProcessedDebitCreditNoteRepositoryImpl implements ProcessedDebitCreditNoteRepository {
+
+    private final JpaProcessedDebitCreditNoteRepository jpaRepository;
+    private final ProcessedDebitCreditNoteMapper mapper;
+
+    @Override
+    public ProcessedDebitCreditNote save(ProcessedDebitCreditNote note) {
+        ProcessedDebitCreditNoteEntity entity = mapper.toEntity(note);
+        ProcessedDebitCreditNoteEntity saved = jpaRepository.save(entity);
+        return mapper.toDomain(saved);
+    }
+
+    @Override
+    public Optional<ProcessedDebitCreditNote> findById(DebitCreditNoteId id) {
+        return jpaRepository.findById(id.getValue()).map(mapper::toDomain);
+    }
+
+    @Override
+    public Optional<ProcessedDebitCreditNote> findByNoteNumber(String noteNumber) {
+        return jpaRepository.findByNoteNumber(noteNumber).map(mapper::toDomain);
+    }
+
+    @Override
+    public Optional<ProcessedDebitCreditNote> findBySourceNoteId(String sourceNoteId) {
+        return jpaRepository.findBySourceNoteId(sourceNoteId).map(mapper::toDomain);
+    }
+
+    @Override
+    public void deleteById(DebitCreditNoteId id) {
+        jpaRepository.deleteById(id.getValue());
+    }
+}
+```
+
+Delete old files:
+```bash
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteRepositoryImpl.java
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/JpaProcessedDebitCreditNoteRepository.java
+```
+
+- [ ] **Step 4: Run repository tests — verify they pass**
+
+```bash
+mvn test -Dtest=ProcessedDebitCreditNoteRepositoryImplTest -pl . 2>&1 | tail -10
+```
+Expected: `BUILD SUCCESS`, all 4 tests pass. At this point the `infrastructure/persistence/` directory should be empty (all files deleted across Tasks 14–15). Run `mvn verify` — it should now pass for the persistence adapter package.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/JpaProcessedDebitCreditNoteRepository.java \
+        src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteRepositoryImpl.java \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/ProcessedDebitCreditNoteRepositoryImplTest.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/ProcessedDebitCreditNoteRepositoryImpl.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/JpaProcessedDebitCreditNoteRepository.java
+git commit -m "Add trimmed repository impl/JPA interface in adapter/out/persistence/ (delete old persistence/ files)"
+```
+
+---
+
+## Task 16: Outbox files (move and add OutboxCleanupScheduler)
+
+**What:** Move `OutboxEventEntity`, `JpaOutboxEventRepository`, and `SpringDataOutboxRepository` from `infrastructure/persistence/outbox/` to `infrastructure/adapter/out/persistence/outbox/` (package update only). Add new `OutboxCleanupScheduler` matching the reference. Delete old files. Write tests for the entity and the scheduler.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/OutboxEventEntity.java`
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/JpaOutboxEventRepository.java`
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/SpringDataOutboxRepository.java`
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/OutboxCleanupScheduler.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/OutboxEventEntityTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/OutboxCleanupSchedulerTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/JpaOutboxEventRepositoryTest.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/OutboxEventEntity.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/JpaOutboxEventRepository.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/SpringDataOutboxRepository.java`
+
+**Note:** `SagaReplyPublisherTransactionTest` imports `SpringDataOutboxRepository` from the new package. That import was already written correctly in Task 11's test code. Ensure the class exists in the new location before running the transaction test.
+
+- [ ] **Step 1: Write the tests**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/OutboxEventEntityTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
+
+import com.wpanther.saga.domain.outbox.OutboxStatus;
+import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class OutboxEventEntityTest {
+
+    @Test
+    void prePersist_setsDefaultsWhenNull() {
+        OutboxEventEntity entity = new OutboxEventEntity();
+        entity.onCreate();
+
+        assertThat(entity.getId()).isNotNull();
+        assertThat(entity.getStatus()).isEqualTo(OutboxStatus.PENDING);
+        assertThat(entity.getCreatedAt()).isNotNull();
+        assertThat(entity.getRetryCount()).isEqualTo(0);
+    }
+
+    @Test
+    void prePersist_doesNotOverwriteExistingId() {
+        UUID existingId = UUID.randomUUID();
+        OutboxEventEntity entity = OutboxEventEntity.builder().id(existingId).build();
+        entity.onCreate();
+
+        assertThat(entity.getId()).isEqualTo(existingId);
+    }
+}
+```
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/JpaOutboxEventRepositoryTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
+
+import com.wpanther.saga.domain.outbox.OutboxStatus;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.test.context.ActiveProfiles;
+
+import java.time.Instant;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+@DataJpaTest
+@ActiveProfiles("test")
+class JpaOutboxEventRepositoryTest {
+
+    @Autowired
+    private JpaOutboxEventRepository repository;
+
+    @Test
+    void deletePublishedBefore_deletesOnlyPublishedEvents() {
+        OutboxEventEntity published = OutboxEventEntity.builder()
+            .aggregateType("ProcessedDebitCreditNote")
+            .aggregateId("agg-1")
+            .eventType("debitcreditnote.processed")
+            .payload("{}")
+            .status(OutboxStatus.PUBLISHED)
+            .publishedAt(Instant.now().minusSeconds(3600))
+            .build();
+
+        OutboxEventEntity pending = OutboxEventEntity.builder()
+            .aggregateType("ProcessedDebitCreditNote")
+            .aggregateId("agg-2")
+            .eventType("debitcreditnote.processed")
+            .payload("{}")
+            .status(OutboxStatus.PENDING)
+            .build();
+
+        repository.save(published);
+        repository.save(pending);
+
+        int deleted = repository.deletePublishedBefore(Instant.now());
+
+        assertThat(deleted).isEqualTo(1);
+        List<OutboxEventEntity> remaining = repository.findAll();
+        assertThat(remaining).hasSize(1);
+        assertThat(remaining.get(0).getStatus()).isEqualTo(OutboxStatus.PENDING);
+    }
+}
+```
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/OutboxCleanupSchedulerTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
+
+import com.wpanther.saga.domain.outbox.OutboxEventRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class OutboxCleanupSchedulerTest {
+
+    @Mock
+    private OutboxEventRepository outboxEventRepository;
+
+    private OutboxCleanupScheduler scheduler;
+
+    @BeforeEach
+    void setUp() {
+        scheduler = new OutboxCleanupScheduler(outboxEventRepository, new SimpleMeterRegistry());
+        ReflectionTestUtils.setField(scheduler, "retentionDays", 7);
+        ReflectionTestUtils.setField(scheduler, "cleanupCron", "0 0 2 * * *");
+    }
+
+    @Test
+    void cleanPublishedEvents_callsDeleteWithCutoffDate() {
+        when(outboxEventRepository.deletePublishedBefore(any())).thenReturn(5);
+
+        scheduler.cleanPublishedEvents();
+
+        verify(outboxEventRepository).deletePublishedBefore(any());
+    }
+
+    @Test
+    void cleanPublishedEvents_onException_doesNotPropagate() {
+        when(outboxEventRepository.deletePublishedBefore(any()))
+            .thenThrow(new RuntimeException("DB down"));
+
+        // must not throw — scheduler catches and increments counter
+        scheduler.cleanPublishedEvents();
+    }
+
+    @Test
+    void logConfiguration_throwsOnInvalidRetentionDays() {
+        ReflectionTestUtils.setField(scheduler, "retentionDays", 0);
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalStateException.class,
+            () -> scheduler.logConfiguration()
+        );
+    }
+}
+```
+
+- [ ] **Step 2: Run tests — verify they fail**
+
+```bash
+mvn test -Dtest="OutboxEventEntityTest,OutboxCleanupSchedulerTest,JpaOutboxEventRepositoryTest" -pl . 2>&1 | tail -10
+```
+Expected: compilation errors — new-package classes do not exist.
+
+- [ ] **Step 3: Create new outbox files AND delete old files**
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/OutboxEventEntity.java` — same content as old file, updated package:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
+
+import com.wpanther.saga.domain.outbox.OutboxEvent;
+import com.wpanther.saga.domain.outbox.OutboxStatus;
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Entity
+@Table(name = "outbox_events", indexes = {
+    @Index(name = "idx_outbox_status", columnList = "status"),
+    @Index(name = "idx_outbox_created", columnList = "created_at"),
+    @Index(name = "idx_outbox_aggregate", columnList = "aggregate_id, aggregate_type")
+})
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class OutboxEventEntity {
+
+    @Id
+    @Column(name = "id", nullable = false)
+    private UUID id;
+
+    @Column(name = "aggregate_type", nullable = false, length = 100)
+    private String aggregateType;
+
+    @Column(name = "aggregate_id", nullable = false, length = 100)
+    private String aggregateId;
+
+    @Column(name = "event_type", nullable = false, length = 100)
+    private String eventType;
+
+    @Column(name = "payload", nullable = false, columnDefinition = "TEXT")
+    private String payload;
+
+    @Column(name = "created_at", nullable = false)
+    private Instant createdAt;
+
+    @Column(name = "published_at")
+    private Instant publishedAt;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false, length = 20)
+    private OutboxStatus status;
+
+    @Column(name = "retry_count")
+    private Integer retryCount;
+
+    @Column(name = "error_message", length = 1000)
+    private String errorMessage;
+
+    @Column(name = "topic", length = 255)
+    private String topic;
+
+    @Column(name = "partition_key", length = 255)
+    private String partitionKey;
+
+    @Column(name = "headers", columnDefinition = "TEXT")
+    private String headers;
+
+    @PrePersist
+    protected void onCreate() {
+        if (id == null) id = UUID.randomUUID();
+        if (status == null) status = OutboxStatus.PENDING;
+        if (createdAt == null) createdAt = Instant.now();
+        if (retryCount == null) retryCount = 0;
+    }
+
+    public static OutboxEventEntity fromDomain(OutboxEvent event) {
+        return OutboxEventEntity.builder()
+                .id(event.getId())
+                .aggregateType(event.getAggregateType())
+                .aggregateId(event.getAggregateId())
+                .eventType(event.getEventType())
+                .payload(event.getPayload())
+                .createdAt(event.getCreatedAt())
+                .publishedAt(event.getPublishedAt())
+                .status(event.getStatus())
+                .retryCount(event.getRetryCount())
+                .errorMessage(event.getErrorMessage())
+                .topic(event.getTopic())
+                .partitionKey(event.getPartitionKey())
+                .headers(event.getHeaders())
+                .build();
+    }
+
+    public OutboxEvent toDomain() {
+        return OutboxEvent.builder()
+                .id(this.id)
+                .aggregateType(this.aggregateType)
+                .aggregateId(this.aggregateId)
+                .eventType(this.eventType)
+                .payload(this.payload)
+                .createdAt(this.createdAt)
+                .publishedAt(this.publishedAt)
+                .status(this.status)
+                .retryCount(this.retryCount)
+                .errorMessage(this.errorMessage)
+                .topic(this.topic)
+                .partitionKey(this.partitionKey)
+                .headers(this.headers)
+                .build();
+    }
+}
+```
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/JpaOutboxEventRepository.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
+
+import com.wpanther.saga.domain.outbox.OutboxStatus;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+public interface JpaOutboxEventRepository extends JpaRepository<OutboxEventEntity, UUID> {
+
+    List<OutboxEventEntity> findByStatusOrderByCreatedAtAsc(OutboxStatus status, Pageable pageable);
+
+    @Query("SELECT e FROM OutboxEventEntity e WHERE e.status = 'FAILED' ORDER BY e.createdAt ASC")
+    List<OutboxEventEntity> findFailedEventsOrderByCreatedAtAsc(Pageable pageable);
+
+    List<OutboxEventEntity> findByAggregateTypeAndAggregateIdOrderByCreatedAtAsc(
+            String aggregateType, String aggregateId);
+
+    @Modifying
+    @Query("DELETE FROM OutboxEventEntity e WHERE e.status = 'PUBLISHED' AND e.publishedAt < :before")
+    int deletePublishedBefore(@Param("before") Instant before);
+}
+```
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/SpringDataOutboxRepository.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
+
+import com.wpanther.saga.domain.outbox.OutboxEvent;
+import com.wpanther.saga.domain.outbox.OutboxEventRepository;
+import com.wpanther.saga.domain.outbox.OutboxStatus;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Component;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+@Component
+@Slf4j
+public class SpringDataOutboxRepository implements OutboxEventRepository {
+
+    private final JpaOutboxEventRepository jpaRepository;
+
+    public SpringDataOutboxRepository(JpaOutboxEventRepository jpaRepository) {
+        this.jpaRepository = jpaRepository;
+    }
+
+    @Override
+    public OutboxEvent save(OutboxEvent event) {
+        log.debug("Saving outbox event: {} for aggregate: {}/{}",
+                event.getId(), event.getAggregateType(), event.getAggregateId());
+        OutboxEventEntity entity = OutboxEventEntity.fromDomain(event);
+        OutboxEventEntity saved = jpaRepository.save(entity);
+        return saved.toDomain();
+    }
+
+    @Override
+    public Optional<OutboxEvent> findById(UUID id) {
+        return jpaRepository.findById(id).map(OutboxEventEntity::toDomain);
+    }
+
+    @Override
+    public List<OutboxEvent> findPendingEvents(int limit) {
+        log.debug("Finding pending events with limit: {}", limit);
+        return jpaRepository.findByStatusOrderByCreatedAtAsc(
+                OutboxStatus.PENDING, Pageable.ofSize(limit))
+                .stream()
+                .map(OutboxEventEntity::toDomain)
+                .toList();
+    }
+
+    @Override
+    public List<OutboxEvent> findFailedEvents(int limit) {
+        log.debug("Finding failed events with limit: {}", limit);
+        return jpaRepository.findFailedEventsOrderByCreatedAtAsc(
+                Pageable.ofSize(limit))
+                .stream()
+                .map(OutboxEventEntity::toDomain)
+                .toList();
+    }
+
+    @Override
+    public int deletePublishedBefore(Instant before) {
+        log.debug("Deleting published events before: {}", before);
+        int deletedCount = jpaRepository.deletePublishedBefore(before);
+        log.info("Deleted {} published events before: {}", deletedCount, before);
+        return deletedCount;
+    }
+
+    @Override
+    public List<OutboxEvent> findByAggregate(String aggregateType, String aggregateId) {
+        log.debug("Finding events for aggregate: {}/{}", aggregateType, aggregateId);
+        return jpaRepository.findByAggregateTypeAndAggregateIdOrderByCreatedAtAsc(
+                aggregateType, aggregateId)
+                .stream()
+                .map(OutboxEventEntity::toDomain)
+                .toList();
+    }
+}
+```
+
+Create `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/OutboxCleanupScheduler.java`:
+
+```java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
+
+import com.wpanther.saga.domain.outbox.OutboxEventRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+
+@Component
+@Slf4j
+public class OutboxCleanupScheduler {
+
+    private final OutboxEventRepository outboxEventRepository;
+    private final Counter cleanupFailureCounter;
+
+    @Value("${app.outbox.cleanup.retention-days:7}")
+    private int retentionDays;
+
+    @Value("${app.outbox.cleanup.cron:0 0 2 * * *}")
+    private String cleanupCron;
+
+    public OutboxCleanupScheduler(OutboxEventRepository outboxEventRepository,
+                                  MeterRegistry meterRegistry) {
+        this.outboxEventRepository = outboxEventRepository;
+        this.cleanupFailureCounter = Counter.builder("outbox.cleanup.failure")
+            .description("Number of times the outbox cleanup job failed")
+            .register(meterRegistry);
+    }
+
+    @PostConstruct
+    void logConfiguration() {
+        if (retentionDays < 1) {
+            throw new IllegalStateException(
+                "app.outbox.cleanup.retention-days must be >= 1, got: " + retentionDays);
+        }
+        log.info("OutboxCleanupScheduler initialized: retention={} days, cron='{}'",
+            retentionDays, cleanupCron);
+    }
+
+    @Scheduled(cron = "${app.outbox.cleanup.cron:0 0 2 * * *}")
+    public void cleanPublishedEvents() {
+        try {
+            Instant cutoff = Instant.now().minus(retentionDays, ChronoUnit.DAYS);
+            int deleted = outboxEventRepository.deletePublishedBefore(cutoff);
+            log.info("Outbox cleanup: deleted {} published events older than {} days", deleted, retentionDays);
+        } catch (Exception e) {
+            cleanupFailureCounter.increment();
+            log.error("Outbox cleanup failed: {}", e.toString());
+        }
+    }
+}
+```
+
+Delete old files:
+```bash
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/OutboxEventEntity.java
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/JpaOutboxEventRepository.java
+rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/SpringDataOutboxRepository.java
+```
+
+- [ ] **Step 4: Run outbox tests — verify they pass**
+
+```bash
+mvn test -Dtest="OutboxEventEntityTest,OutboxCleanupSchedulerTest,JpaOutboxEventRepositoryTest" -pl . 2>&1 | tail -15
+```
+Expected: `BUILD SUCCESS`, all tests pass.
+
+- [ ] **Step 5: Also run the SagaReplyPublisher transaction test now that SpringDataOutboxRepository is in the correct package**
+
+```bash
+mvn test -Dtest=SagaReplyPublisherTransactionTest -pl . 2>&1 | tail -15
+```
+Expected: `BUILD SUCCESS`, all 6 transaction tests pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/ \
+        src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/out/persistence/outbox/
+git rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/OutboxEventEntity.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/JpaOutboxEventRepository.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/persistence/outbox/SpringDataOutboxRepository.java
+git commit -m "Move outbox files to adapter/out/persistence/outbox/ and add OutboxCleanupScheduler"
+```
+
+---
+
+<!-- Tasks 17–22 will be added in subsequent batches -->
