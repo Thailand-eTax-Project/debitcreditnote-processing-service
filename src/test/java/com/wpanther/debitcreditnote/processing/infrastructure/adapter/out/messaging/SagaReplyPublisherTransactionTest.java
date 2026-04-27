@@ -1,7 +1,7 @@
 package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
 
-import com.wpanther.debitcreditnote.processing.infrastructure.persistence.outbox.OutboxEventEntity;
-import com.wpanther.debitcreditnote.processing.infrastructure.persistence.outbox.SpringDataOutboxRepository;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox.OutboxEventEntity;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox.SpringDataOutboxRepository;
 import com.wpanther.saga.domain.enums.SagaStep;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
