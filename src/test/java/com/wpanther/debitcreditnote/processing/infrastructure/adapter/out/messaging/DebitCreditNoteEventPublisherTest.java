@@ -1,0 +1,175 @@
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.debitcreditnote.processing.domain.event.DebitCreditNoteProcessedDomainEvent;
+import com.wpanther.debitcreditnote.processing.domain.model.Money;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import java.math.BigDecimal;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+/**
+ * Unit tests for DebitCreditNoteEventPublisher
+ */
+@ExtendWith(MockitoExtension.class)
+class DebitCreditNoteEventPublisherTest {
+
+    @Mock
+    private OutboxService outboxService;
+
+    @Mock
+    private HeaderSerializer headerSerializer;
+
+    private DebitCreditNoteEventPublisher eventPublisher;
+
+    @BeforeEach
+    void setUp() {
+        eventPublisher = new DebitCreditNoteEventPublisher(outboxService, headerSerializer, "debitcreditnote.processed");
+    }
+
+    @Test
+    void testPublishDebitCreditNoteProcessedSuccess() throws Exception {
+        // Given
+        DebitCreditNoteProcessedDomainEvent event = new DebitCreditNoteProcessedDomainEvent(
+            "550e8400-e29b-41d4-a716-446655440000",
+            "DCN-001",
+            Money.of(new BigDecimal("10000.00"), "THB"),
+            "saga-123",
+            "correlation-123",
+            java.time.Instant.now()
+        );
+
+        when(headerSerializer.toJson(any())).thenReturn("{\"correlationId\":\"correlation-123\",\"documentNumber\":\"DCN-001\"}");
+
+        // When
+        eventPublisher.publish(event);
+
+        // Then
+        verify(outboxService).saveWithRouting(
+            any(com.wpanther.debitcreditnote.processing.application.dto.event.DebitCreditNoteProcessedEvent.class),
+            eq("ProcessedDebitCreditNote"),
+            eq("550e8400-e29b-41d4-a716-446655440000"),
+            eq("debitcreditnote.processed"),
+            eq("550e8400-e29b-41d4-a716-446655440000"),
+            eq("{\"correlationId\":\"correlation-123\",\"documentNumber\":\"DCN-001\"}")
+        );
+    }
+
+    @Test
+    void testPublishDebitCreditNoteProcessedHeaderContent() throws Exception {
+        // Given
+        DebitCreditNoteProcessedDomainEvent event = new DebitCreditNoteProcessedDomainEvent(
+            "550e8400-e29b-41d4-a716-446655440001",
+            "DCN-001",
+            Money.of(new BigDecimal("10000.00"), "THB"),
+            "saga-123",
+            "correlation-123",
+            java.time.Instant.now()
+        );
+
+        when(headerSerializer.toJson(any())).thenReturn("{\"correlationId\":\"correlation-123\",\"documentNumber\":\"DCN-001\"}");
+
+        // When
+        eventPublisher.publish(event);
+
+        // Then
+        ArgumentCaptor<String> headersCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            headersCaptor.capture()
+        );
+
+        String headers = headersCaptor.getValue();
+        assertTrue(headers.contains("correlation-123"));
+        assertTrue(headers.contains("DCN-001"));
+    }
+
+    @Test
+    void testToJsonError() throws Exception {
+        // Given
+        DebitCreditNoteProcessedDomainEvent event = new DebitCreditNoteProcessedDomainEvent(
+            "550e8400-e29b-41d4-a716-446655440002",
+            "DCN-001",
+            Money.of(new BigDecimal("10000.00"), "THB"),
+            "saga-123",
+            "correlation-123",
+            java.time.Instant.now()
+        );
+
+        when(headerSerializer.toJson(any())).thenReturn(null);
+
+        // When
+        eventPublisher.publish(event);
+
+        // Then
+        ArgumentCaptor<String> headersCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            headersCaptor.capture()
+        );
+
+        assertNull(headersCaptor.getValue());
+    }
+
+    @Test
+    void testPublishUsesCorrectTopic() throws Exception {
+        // Given
+        DebitCreditNoteProcessedDomainEvent event = new DebitCreditNoteProcessedDomainEvent(
+            "550e8400-e29b-41d4-a716-446655440003",
+            "DCN-001",
+            Money.of(new BigDecimal("10000.00"), "THB"),
+            "saga-123",
+            "correlation-123",
+            java.time.Instant.now()
+        );
+
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+
+        // When
+        eventPublisher.publish(event);
+
+        // Then
+        ArgumentCaptor<String> topicCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), any(), topicCaptor.capture(), any(), any());
+        assertEquals("debitcreditnote.processed", topicCaptor.getValue());
+    }
+
+    @Test
+    void testPublishUsesDocumentIdAsPartitionKey() throws Exception {
+        // Given
+        DebitCreditNoteProcessedDomainEvent event = new DebitCreditNoteProcessedDomainEvent(
+            "550e8400-e29b-41d4-a716-446655440004",
+            "DCN-002",
+            Money.of(new BigDecimal("5000.00"), "THB"),
+            "saga-456",
+            "correlation-456",
+            java.time.Instant.now()
+        );
+
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+
+        // When
+        eventPublisher.publish(event);
+
+        // Then
+        ArgumentCaptor<String> partitionKeyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), any(), any(), partitionKeyCaptor.capture(), any());
+        assertEquals("550e8400-e29b-41d4-a716-446655440004", partitionKeyCaptor.getValue());
+    }
+}
