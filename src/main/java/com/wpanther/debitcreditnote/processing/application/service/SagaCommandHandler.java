@@ -5,7 +5,7 @@ import com.wpanther.debitcreditnote.processing.domain.event.ProcessDebitCreditNo
 import com.wpanther.debitcreditnote.processing.domain.model.DebitCreditNoteId;
 import com.wpanther.debitcreditnote.processing.domain.model.ProcessedDebitCreditNote;
 import com.wpanther.debitcreditnote.processing.domain.repository.ProcessedDebitCreditNoteRepository;
-import com.wpanther.debitcreditnote.processing.infrastructure.messaging.SagaReplyPublisher;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging.SagaReplyPublisher;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;

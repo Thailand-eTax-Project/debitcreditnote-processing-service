@@ -6,7 +6,7 @@ import com.wpanther.debitcreditnote.processing.domain.model.ProcessedDebitCredit
 import com.wpanther.debitcreditnote.processing.domain.repository.ProcessedDebitCreditNoteRepository;
 import com.wpanther.debitcreditnote.processing.domain.service.DebitCreditNoteParserService;
 import com.wpanther.debitcreditnote.processing.domain.service.DebitCreditNoteParserService.DebitCreditNoteParsingException;
-import com.wpanther.debitcreditnote.processing.infrastructure.messaging.EventPublisher;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging.DebitCreditNoteEventPublisher;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -22,7 +22,7 @@ public class DebitCreditNoteProcessingService {
 
     private final DebitCreditNoteParserService parserService;
     private final ProcessedDebitCreditNoteRepository noteRepository;
-    private final EventPublisher eventPublisher;
+    private final DebitCreditNoteEventPublisher eventPublisher;
 
     @Transactional
     public void processNoteForSaga(String sourceNoteId, String xmlContent, String correlationId) throws DebitCreditNoteParsingException {
