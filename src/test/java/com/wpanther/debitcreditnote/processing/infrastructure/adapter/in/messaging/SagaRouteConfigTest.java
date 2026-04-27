@@ -1,10 +1,8 @@
 package com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import com.wpanther.saga.domain.enums.SagaStep;
 import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.CompensateDebitCreditNoteCommand;
 import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.ProcessDebitCreditNoteCommand;
+import com.wpanther.saga.domain.enums.SagaStep;
 import org.apache.camel.CamelContext;
 import org.apache.camel.ProducerTemplate;
 import org.apache.camel.Route;
@@ -38,14 +36,13 @@ class SagaRouteConfigTest {
     @MockBean
     private SagaCommandHandler sagaCommandHandler;
 
-    private ObjectMapper objectMapper;
+    private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
     @BeforeEach
     void setUp() throws Exception {
-        objectMapper = new ObjectMapper();
-        objectMapper.registerModule(new JavaTimeModule());
+        objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        objectMapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
 
-        // Replace Kafka endpoints with direct endpoints for testing
         AdviceWith.adviceWith(camelContext, "saga-command-consumer", a -> {
             a.replaceFromWith("direct:saga-command");
         });
@@ -81,37 +78,31 @@ class SagaRouteConfigTest {
 
     @Test
     void shouldProcessSagaCommand() throws Exception {
-        // Given
         ProcessDebitCreditNoteCommand command = new ProcessDebitCreditNoteCommand(
             "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1",
-            "doc-1", "<xml>test</xml>", "DN-001"
+            "doc-1", "<xml>test</xml>", "DCN-001"
         );
         String json = objectMapper.writeValueAsString(command);
 
-        // When
         try (ProducerTemplate producer = camelContext.createProducerTemplate()) {
             producer.sendBody("direct:saga-command", json);
         }
 
-        // Then
         verify(sagaCommandHandler).handleProcessCommand(any(ProcessDebitCreditNoteCommand.class));
     }
 
     @Test
     void shouldProcessCompensationCommand() throws Exception {
-        // Given
         CompensateDebitCreditNoteCommand command = new CompensateDebitCreditNoteCommand(
             "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1",
             "process-debit-credit-note", "doc-1", "debit-credit-note"
         );
         String json = objectMapper.writeValueAsString(command);
 
-        // When
         try (ProducerTemplate producer = camelContext.createProducerTemplate()) {
             producer.sendBody("direct:saga-compensation", json);
         }
 
-        // Then
         verify(sagaCommandHandler).handleCompensation(any(CompensateDebitCreditNoteCommand.class));
     }
 }

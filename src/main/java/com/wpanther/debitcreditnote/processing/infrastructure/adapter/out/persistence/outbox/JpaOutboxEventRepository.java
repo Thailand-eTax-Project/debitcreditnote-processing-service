@@ -24,4 +24,6 @@ public interface JpaOutboxEventRepository extends JpaRepository<OutboxEventEntit
     @Modifying
     @Query("DELETE FROM OutboxEventEntity e WHERE e.status = 'PUBLISHED' AND e.publishedAt < :before")
     int deletePublishedBefore(@Param("before") Instant before);
+
+    List<OutboxEventEntity> findByAggregateId(String aggregateId);
 }
