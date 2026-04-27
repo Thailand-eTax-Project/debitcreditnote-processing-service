@@ -1,0 +1,116 @@
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.debitcreditnote.processing.application.port.out.SagaReplyPort;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging.dto.DebitCreditNoteReplyEvent;
+import com.wpanther.debitcreditnote.processing.infrastructure.config.KafkaTopicsProperties;
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Map;
+
+
+/**
+ * Saga reply publisher - driven adapter that publishes saga replies via outbox pattern.
+ * Replies are sent to the orchestrator via configurable saga.reply.debitcreditnote topic.
+ */
+@Component
+@Slf4j
+public class SagaReplyPublisher implements SagaReplyPort {
+
+    private static final String AGGREGATE_TYPE = "ProcessedDebitCreditNote";
+
+    private final OutboxService outboxService;
+    private final HeaderSerializer headerSerializer;
+    private final String replyTopic;
+
+    /** Production constructor -- Spring injects the bound {@link KafkaTopicsProperties}. */
+    @Autowired
+    public SagaReplyPublisher(
+            OutboxService outboxService,
+            HeaderSerializer headerSerializer,
+            KafkaTopicsProperties topics) {
+        this(outboxService, headerSerializer, topics.sagaReplyDebitcreditnote());
+    }
+
+    /** Package-private constructor for unit tests that pass the topic string directly. */
+    SagaReplyPublisher(OutboxService outboxService, HeaderSerializer headerSerializer, String replyTopic) {
+        this.outboxService = outboxService;
+        this.headerSerializer = headerSerializer;
+        this.replyTopic = replyTopic;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publishSuccess(String sagaId, SagaStep sagaStep, String correlationId) {
+        DebitCreditNoteReplyEvent reply = DebitCreditNoteReplyEvent.success(sagaId, sagaStep, correlationId);
+
+        Map<String, String> headers = Map.of(
+            "sagaId", sagaId,
+            "correlationId", correlationId,
+            "status", "SUCCESS"
+        );
+
+        outboxService.saveWithRouting(
+            reply,
+            AGGREGATE_TYPE,
+            sagaId,
+            replyTopic,
+            sagaId,
+            headerSerializer.toJson(headers)
+        );
+
+        log.info("Published SUCCESS saga reply for saga {} step {}", sagaId, sagaStep);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void publishFailure(String sagaId, SagaStep sagaStep, String correlationId, String errorMessage) {
+        DebitCreditNoteReplyEvent reply = DebitCreditNoteReplyEvent.failure(sagaId, sagaStep, correlationId, errorMessage);
+
+        Map<String, String> headers = Map.of(
+            "sagaId", sagaId,
+            "correlationId", correlationId,
+            "status", "FAILURE"
+        );
+
+        outboxService.saveWithRouting(
+            reply,
+            AGGREGATE_TYPE,
+            sagaId,
+            replyTopic,
+            sagaId,
+            headerSerializer.toJson(headers)
+        );
+
+        log.info("Published FAILURE saga reply for saga {} step {}: {}", sagaId, sagaStep, errorMessage);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publishCompensated(String sagaId, SagaStep sagaStep, String correlationId) {
+        DebitCreditNoteReplyEvent reply = DebitCreditNoteReplyEvent.compensated(sagaId, sagaStep, correlationId);
+
+        Map<String, String> headers = Map.of(
+            "sagaId", sagaId,
+            "correlationId", correlationId,
+            "status", "COMPENSATED"
+        );
+
+        outboxService.saveWithRouting(
+            reply,
+            AGGREGATE_TYPE,
+            sagaId,
+            replyTopic,
+            sagaId,
+            headerSerializer.toJson(headers)
+        );
+
+        log.info("Published COMPENSATED saga reply for saga {} step {}", sagaId, sagaStep);
+    }
+
+}
