@@ -3513,4 +3513,1794 @@ git commit -m "Move outbox files to adapter/out/persistence/outbox/ and add Outb
 
 ---
 
-<!-- Tasks 17–22 will be added in subsequent batches -->
+## Task 17: OutboxConfig + application.yml + application-test.yml
+
+**What:** Create `infrastructure/config/OutboxConfig.java` (same location — not moved to adapter package, matching the reference). Update `application.yml` with new `app.parsing.*`, `app.outbox.cleanup.*`, `app.camel.retry.*`, `app.kafka.consumers.*` sections. Update `application-test.yml` to match the expanded config.
+
+**Critical naming difference from taxinvoice:** In this service, `JpaOutboxEventRepository` is the Spring Data JPA **interface** and `SpringDataOutboxRepository` is the `@Component` concrete adapter. So `OutboxConfig.outboxEventRepository()` must `return springRepository` — NOT `return new JpaOutboxEventRepository(springRepository)`.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/config/OutboxConfig.java`
+- Modify: `src/main/resources/application.yml`
+- Modify: `src/test/resources/application-test.yml`
+
+- [ ] **Step 1: Create OutboxConfig**
+
+```java
+// src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/config/OutboxConfig.java
+package com.wpanther.debitcreditnote.processing.infrastructure.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox.SpringDataOutboxRepository;
+import com.wpanther.saga.domain.outbox.OutboxEventRepository;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class OutboxConfig {
+
+    @Bean
+    @ConditionalOnMissingBean(OutboxEventRepository.class)
+    public OutboxEventRepository outboxEventRepository(SpringDataOutboxRepository springRepository) {
+        return springRepository;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(OutboxService.class)
+    public OutboxService outboxService(OutboxEventRepository repository, ObjectMapper objectMapper) {
+        return new OutboxService(repository, objectMapper);
+    }
+}
+```
+
+- [ ] **Step 2: Update application.yml**
+
+Add the following sections after the existing `app:` block (after `saga-reply-debitcreditnote`). Keep all existing content intact.
+
+```yaml
+# Replace the existing app: block entirely with:
+app:
+  parsing:
+    timeout-seconds: 10
+    max-concurrent: 300
+  debitcreditnote:
+    default-due-date-days: 30
+  outbox:
+    cleanup:
+      retention-days: 7
+      cron: "0 0 2 * * *"
+  camel:
+    retry:
+      max-redeliveries: 3
+      redelivery-delay-ms: 1000
+      backoff-multiplier: 2.0
+      max-redelivery-delay-ms: 10000
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    consumers:
+      max-poll-records: 100
+      count: 3
+    topics:
+      debitcreditnote-processed: debitcreditnote.processed
+      dlq: debitcreditnote.processing.dlq
+      saga-command-debitcreditnote: saga.command.debitcreditnote
+      saga-compensation-debitcreditnote: saga.compensation.debitcreditnote
+      saga-reply-debitcreditnote: saga.reply.debitcreditnote
+```
+
+Also add `spring.transaction.default-timeout: 30` after the `flyway:` block, matching the reference.
+
+- [ ] **Step 3: Update application-test.yml**
+
+Replace the full content with expanded test configuration:
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        format_sql: true
+
+  flyway:
+    enabled: false
+
+  transaction:
+    default-timeout: 30
+
+camel:
+  springboot:
+    name: debitcreditnote-processing-camel-test
+  dataformat:
+    jackson:
+      auto-discover-object-mapper: true
+
+app:
+  parsing:
+    timeout-seconds: 5
+    max-concurrent: 10
+  debitcreditnote:
+    default-due-date-days: 30
+  outbox:
+    cleanup:
+      retention-days: 7
+      cron: "0 0 2 * * *"
+  camel:
+    retry:
+      max-redeliveries: 3
+      redelivery-delay-ms: 500
+      backoff-multiplier: 2.0
+      max-redelivery-delay-ms: 5000
+  kafka:
+    bootstrap-servers: localhost:9093
+    consumers:
+      max-poll-records: 10
+      count: 1
+    topics:
+      debitcreditnote-processed: debitcreditnote.processed.test
+      dlq: debitcreditnote.processing.dlq.test
+      saga-command-debitcreditnote: saga.command.debitcreditnote.test
+      saga-compensation-debitcreditnote: saga.compensation.debitcreditnote.test
+      saga-reply-debitcreditnote: saga.reply.debitcreditnote.test
+
+logging:
+  level:
+    root: WARN
+    com.wpanther.debitcreditnote.processing: INFO
+    org.apache.camel: WARN
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/config/OutboxConfig.java \
+       src/main/resources/application.yml \
+       src/test/resources/application-test.yml
+git commit -m "Add OutboxConfig and expand application.yml with parsing, outbox, retry config"
+```
+
+---
+
+## Task 18: SagaCommandHandler + SagaRouteConfig (inbound adapters)
+
+**What:** Create the new inbound adapter versions. `SagaCommandHandler` moves from `application/service/` to `infrastructure/adapter/in/messaging/` — becomes a thin delegate with no `@Transactional`, no direct repository or publisher access. `SagaRouteConfig` moves from `infrastructure/config/` to `infrastructure/adapter/in/messaging/` — uses `KafkaTopicsProperties` for topic names, configurable retry params via `@Value`, `kafkaConsumerParams()` helper. Write unit tests for both. Delete old files in the same commit.
+
+**Files:**
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaCommandHandler.java`
+- Create: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaRouteConfig.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaCommandHandlerTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaRouteConfigTest.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/application/service/SagaCommandHandler.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/config/SagaRouteConfig.java`
+
+- [ ] **Step 1: Create SagaCommandHandler (thin delegate)**
+
+```java
+// src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaCommandHandler.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging;
+
+import com.wpanther.debitcreditnote.processing.application.port.in.CompensateDebitCreditNoteUseCase;
+import com.wpanther.debitcreditnote.processing.application.port.in.ProcessDebitCreditNoteUseCase;
+import com.wpanther.debitcreditnote.processing.application.port.in.ProcessDebitCreditNoteUseCase.ProcessingException;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.CompensateDebitCreditNoteCommand;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.ProcessDebitCreditNoteCommand;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class SagaCommandHandler {
+
+    private final ProcessDebitCreditNoteUseCase processUseCase;
+    private final CompensateDebitCreditNoteUseCase compensateUseCase;
+
+    public void handleProcessCommand(ProcessDebitCreditNoteCommand command) {
+        log.info("Handling ProcessDebitCreditNoteCommand for saga {} document {}",
+            command.getSagaId(), command.getDocumentId());
+
+        try {
+            processUseCase.process(
+                command.getDocumentId(),
+                command.getXmlContent(),
+                command.getSagaId(),
+                command.getSagaStep(),
+                command.getCorrelationId()
+            );
+        } catch (ProcessingException e) {
+            log.error("ProcessingException for saga {} document {}: {}",
+                command.getSagaId(), command.getDocumentId(), e.getMessage(), e);
+        }
+    }
+
+    public void handleCompensation(CompensateDebitCreditNoteCommand command) {
+        log.info("Handling compensation for saga {} document {}",
+            command.getSagaId(), command.getDocumentId());
+
+        compensateUseCase.compensate(
+            command.getDocumentId(),
+            command.getSagaId(),
+            command.getSagaStep(),
+            command.getCorrelationId()
+        );
+    }
+}
+```
+
+- [ ] **Step 2: Create SagaRouteConfig (with KafkaTopicsProperties)**
+
+```java
+// src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaRouteConfig.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging;
+
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.CompensateDebitCreditNoteCommand;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.ProcessDebitCreditNoteCommand;
+import com.wpanther.debitcreditnote.processing.infrastructure.config.KafkaTopicsProperties;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.model.dataformat.JsonLibrary;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+@Component
+@Slf4j
+public class SagaRouteConfig extends RouteBuilder {
+
+    private static final String GROUP_ID = "debitcreditnote-processing-service";
+
+    private final SagaCommandHandler sagaCommandHandler;
+    private final KafkaTopicsProperties topics;
+
+    @Value("${app.kafka.bootstrap-servers}")
+    private String kafkaBrokers;
+
+    @Value("${app.camel.retry.max-redeliveries:3}")
+    private int maxRedeliveries;
+
+    @Value("${app.camel.retry.redelivery-delay-ms:1000}")
+    private long redeliveryDelayMs;
+
+    @Value("${app.camel.retry.backoff-multiplier:2.0}")
+    private double backoffMultiplier;
+
+    @Value("${app.camel.retry.max-redelivery-delay-ms:10000}")
+    private long maxRedeliveryDelayMs;
+
+    @Value("${app.kafka.consumers.max-poll-records:100}")
+    private int maxPollRecords;
+
+    @Value("${app.kafka.consumers.count:3}")
+    private int consumersCount;
+
+    public SagaRouteConfig(SagaCommandHandler sagaCommandHandler, KafkaTopicsProperties topics) {
+        this.sagaCommandHandler = sagaCommandHandler;
+        this.topics = topics;
+    }
+
+    private String kafkaConsumerParams() {
+        return "?brokers=RAW(" + kafkaBrokers + ")"
+            + "&groupId=" + GROUP_ID
+            + "&autoOffsetReset=earliest"
+            + "&autoCommitEnable=false"
+            + "&breakOnFirstError=true"
+            + "&maxPollRecords=" + maxPollRecords
+            + "&consumersCount=" + consumersCount;
+    }
+
+    @Override
+    public void configure() throws Exception {
+
+        errorHandler(deadLetterChannel("kafka:" + topics.dlq() + "?brokers=RAW(" + kafkaBrokers + ")")
+            .maximumRedeliveries(maxRedeliveries)
+            .redeliveryDelay(redeliveryDelayMs)
+            .useExponentialBackOff()
+            .backOffMultiplier(backoffMultiplier)
+            .maximumRedeliveryDelay(maxRedeliveryDelayMs)
+            .logExhausted(true)
+            .logStackTrace(true));
+
+        from("kafka:" + topics.sagaCommandDebitcreditnote() + kafkaConsumerParams())
+            .routeId("saga-command-consumer")
+            .log("Received saga command from Kafka: partition=${header[kafka.PARTITION]}, offset=${header[kafka.OFFSET]}")
+            .unmarshal().json(JsonLibrary.Jackson, ProcessDebitCreditNoteCommand.class)
+            .process(exchange -> {
+                ProcessDebitCreditNoteCommand cmd = exchange.getIn().getBody(ProcessDebitCreditNoteCommand.class);
+                log.info("Processing saga command for saga: {}, note: {}",
+                    cmd.getSagaId(), cmd.getNoteNumber());
+                sagaCommandHandler.handleProcessCommand(cmd);
+            })
+            .log("Successfully processed saga command");
+
+        from("kafka:" + topics.sagaCompensationDebitcreditnote() + kafkaConsumerParams())
+            .routeId("saga-compensation-consumer")
+            .log("Received compensation command from Kafka: partition=${header[kafka.PARTITION]}, offset=${header[kafka.OFFSET]}")
+            .unmarshal().json(JsonLibrary.Jackson, CompensateDebitCreditNoteCommand.class)
+            .process(exchange -> {
+                CompensateDebitCreditNoteCommand cmd = exchange.getIn().getBody(CompensateDebitCreditNoteCommand.class);
+                log.info("Processing compensation for saga: {}, document: {}",
+                    cmd.getSagaId(), cmd.getDocumentId());
+                sagaCommandHandler.handleCompensation(cmd);
+            })
+            .log("Successfully processed compensation command");
+    }
+}
+```
+
+- [ ] **Step 3: Write SagaCommandHandlerTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaCommandHandlerTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging;
+
+import com.wpanther.debitcreditnote.processing.application.port.in.CompensateDebitCreditNoteUseCase;
+import com.wpanther.debitcreditnote.processing.application.port.in.ProcessDebitCreditNoteUseCase;
+import com.wpanther.debitcreditnote.processing.application.port.in.ProcessDebitCreditNoteUseCase.ProcessingException;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.CompensateDebitCreditNoteCommand;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.ProcessDebitCreditNoteCommand;
+import com.wpanther.saga.domain.enums.SagaStep;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class SagaCommandHandlerTest {
+
+    @Mock
+    private ProcessDebitCreditNoteUseCase processUseCase;
+
+    @Mock
+    private CompensateDebitCreditNoteUseCase compensateUseCase;
+
+    @InjectMocks
+    private SagaCommandHandler sagaCommandHandler;
+
+    private ProcessDebitCreditNoteCommand validCommand;
+    private CompensateDebitCreditNoteCommand compensateCommand;
+
+    @BeforeEach
+    void setUp() {
+        validCommand = new ProcessDebitCreditNoteCommand(
+            "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1", "doc-001", "<xml/>", "CN-001"
+        );
+
+        compensateCommand = new CompensateDebitCreditNoteCommand(
+            "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1",
+            "process-debit-credit-note", "doc-001", "debitcreditnote"
+        );
+    }
+
+    @Test
+    void shouldDelegateToProcessUseCase() throws Exception {
+        doNothing().when(processUseCase).process(any(), any(), any(), any(), any());
+
+        sagaCommandHandler.handleProcessCommand(validCommand);
+
+        verify(processUseCase).process(
+            eq("doc-001"),
+            eq("<xml/>"),
+            eq("saga-1"),
+            eq(SagaStep.PROCESS_DEBIT_CREDIT_NOTE),
+            eq("corr-1")
+        );
+        verify(compensateUseCase, never()).compensate(any(), any(), any(), any());
+    }
+
+    @Test
+    void shouldDelegateToCompensateUseCase() {
+        doNothing().when(compensateUseCase).compensate(any(), any(), any(), any());
+
+        sagaCommandHandler.handleCompensation(compensateCommand);
+
+        verify(compensateUseCase).compensate(
+            eq("doc-001"),
+            eq("saga-1"),
+            eq(SagaStep.PROCESS_DEBIT_CREDIT_NOTE),
+            eq("corr-1")
+        );
+        verify(processUseCase, never()).process(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void shouldCatchProcessingException() throws Exception {
+        doThrow(new ProcessingException("Processing error"))
+            .when(processUseCase).process(any(), any(), any(), any(), any());
+
+        assertDoesNotThrow(() -> sagaCommandHandler.handleProcessCommand(validCommand));
+
+        verify(processUseCase).process(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void shouldPropagateCompensationException() {
+        doThrow(new CompensateDebitCreditNoteUseCase.CompensationException(
+                "Compensation failed", new RuntimeException("DB error")))
+            .when(compensateUseCase).compensate(any(), any(), any(), any());
+
+        assertThrows(CompensateDebitCreditNoteUseCase.CompensationException.class,
+            () -> sagaCommandHandler.handleCompensation(compensateCommand));
+
+        verify(compensateUseCase).compensate(any(), any(), any(), any());
+    }
+}
+```
+
+- [ ] **Step 4: Write SagaRouteConfigTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaRouteConfigTest.java
+package com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.CompensateDebitCreditNoteCommand;
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.in.messaging.dto.ProcessDebitCreditNoteCommand;
+import com.wpanther.saga.domain.enums.SagaStep;
+import org.apache.camel.CamelContext;
+import org.apache.camel.ProducerTemplate;
+import org.apache.camel.Route;
+import org.apache.camel.builder.AdviceWith;
+import org.apache.camel.test.spring.junit5.CamelSpringBootTest;
+import org.apache.camel.test.spring.junit5.UseAdviceWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.ActiveProfiles;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
+
+@CamelSpringBootTest
+@SpringBootTest
+@ActiveProfiles("test")
+@UseAdviceWith
+class SagaRouteConfigTest {
+
+    @Autowired
+    private CamelContext camelContext;
+
+    @MockBean
+    private SagaCommandHandler sagaCommandHandler;
+
+    private ObjectMapper objectMapper;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        objectMapper = new ObjectMapper();
+        objectMapper.registerModule(new JavaTimeModule());
+
+        AdviceWith.adviceWith(camelContext, "saga-command-consumer", a -> {
+            a.replaceFromWith("direct:saga-command");
+        });
+        AdviceWith.adviceWith(camelContext, "saga-compensation-consumer", a -> {
+            a.replaceFromWith("direct:saga-compensation");
+        });
+
+        camelContext.start();
+    }
+
+    @Test
+    void shouldHaveAllRoutesConfigured() {
+        List<Route> routes = camelContext.getRoutes();
+        assertFalse(routes.isEmpty(), "No Camel routes found");
+
+        List<String> routeIds = routes.stream()
+            .map(Route::getRouteId)
+            .toList();
+
+        assertTrue(routeIds.contains("saga-command-consumer"),
+            "Missing saga-command-consumer route. Found: " + routeIds);
+        assertTrue(routeIds.contains("saga-compensation-consumer"),
+            "Missing saga-compensation-consumer route. Found: " + routeIds);
+    }
+
+    @Test
+    void shouldHaveExactlyTwoRoutes() {
+        List<Route> routes = camelContext.getRoutes();
+        assertEquals(2, routes.size(),
+            "Expected exactly 2 routes but found: " + routes.stream()
+                .map(Route::getRouteId).toList());
+    }
+
+    @Test
+    void shouldProcessSagaCommand() throws Exception {
+        ProcessDebitCreditNoteCommand command = new ProcessDebitCreditNoteCommand(
+            "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1",
+            "doc-1", "<xml>test</xml>", "CN-001"
+        );
+        String json = objectMapper.writeValueAsString(command);
+
+        try (ProducerTemplate producer = camelContext.createProducerTemplate()) {
+            producer.sendBody("direct:saga-command", json);
+        }
+
+        verify(sagaCommandHandler).handleProcessCommand(any(ProcessDebitCreditNoteCommand.class));
+    }
+
+    @Test
+    void shouldProcessCompensationCommand() throws Exception {
+        CompensateDebitCreditNoteCommand command = new CompensateDebitCreditNoteCommand(
+            "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1",
+            "process-debit-credit-note", "doc-1", "debitcreditnote"
+        );
+        String json = objectMapper.writeValueAsString(command);
+
+        try (ProducerTemplate producer = camelContext.createProducerTemplate()) {
+            producer.sendBody("direct:saga-compensation", json);
+        }
+
+        verify(sagaCommandHandler).handleCompensation(any(CompensateDebitCreditNoteCommand.class));
+    }
+}
+```
+
+- [ ] **Step 5: Delete old files and commit (atomic)**
+
+Delete the old `SagaCommandHandler` from `application/service/` and old `SagaRouteConfig` from `infrastructure/config/`. Both must be deleted in the same commit as the new adapter files to avoid bean registration conflicts.
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaCommandHandler.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaRouteConfig.java \
+       src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaCommandHandlerTest.java \
+       src/test/java/com/wpanther/debitcreditnote/processing/infrastructure/adapter/in/messaging/SagaRouteConfigTest.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/application/service/SagaCommandHandler.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/config/SagaRouteConfig.java
+git commit -m "Move SagaCommandHandler and SagaRouteConfig to adapter/in/messaging with unit tests"
+```
+
+---
+
+## Task 19: DebitCreditNoteProcessingService (full rewrite) + test
+
+**What:** Rewrite `application/service/DebitCreditNoteProcessingService.java` to implement both `ProcessDebitCreditNoteUseCase` and `CompensateDebitCreditNoteUseCase`. Add Micrometer metrics (7 counters + 1 timer), `REQUIRES_NEW` template, all idempotency paths, race-condition handling, and full compensation support. Write comprehensive unit test. Delete old `domain/service/DebitCreditNoteParserService.java` and `domain/repository/ProcessedDebitCreditNoteRepository.java` after confirming all references are updated.
+
+**Files:**
+- Rewrite: `src/main/java/com/wpanther/debitcreditnote/processing/application/service/DebitCreditNoteProcessingService.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/application/service/DebitCreditNoteProcessingServiceTest.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/domain/service/DebitCreditNoteParserService.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/domain/repository/ProcessedDebitCreditNoteRepository.java`
+
+- [ ] **Step 1: Rewrite DebitCreditNoteProcessingService**
+
+```java
+// src/main/java/com/wpanther/debitcreditnote/processing/application/service/DebitCreditNoteProcessingService.java
+package com.wpanther.debitcreditnote.processing.application.service;
+
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.debitcreditnote.processing.application.port.in.CompensateDebitCreditNoteUseCase;
+import com.wpanther.debitcreditnote.processing.application.port.in.ProcessDebitCreditNoteUseCase;
+import com.wpanther.debitcreditnote.processing.application.port.out.SagaReplyPort;
+import com.wpanther.debitcreditnote.processing.application.port.out.DebitCreditNoteEventPublishingPort;
+import com.wpanther.debitcreditnote.processing.domain.event.DebitCreditNoteProcessedDomainEvent;
+import com.wpanther.debitcreditnote.processing.domain.model.DebitCreditNoteId;
+import com.wpanther.debitcreditnote.processing.domain.model.ProcessedDebitCreditNote;
+import com.wpanther.debitcreditnote.processing.domain.model.ProcessingStatus;
+import com.wpanther.debitcreditnote.processing.domain.port.out.ProcessedDebitCreditNoteRepository;
+import com.wpanther.debitcreditnote.processing.domain.port.out.DebitCreditNoteParserPort;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.sql.SQLException;
+import java.util.Optional;
+
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Service
+@Slf4j
+public class DebitCreditNoteProcessingService implements ProcessDebitCreditNoteUseCase, CompensateDebitCreditNoteUseCase {
+
+    private final ProcessedDebitCreditNoteRepository noteRepository;
+    private final DebitCreditNoteParserPort parserService;
+    private final DebitCreditNoteEventPublishingPort eventPublisher;
+    private final SagaReplyPort sagaReplyPort;
+    private final MeterRegistry meterRegistry;
+
+    private final TransactionTemplate requiresNewTemplate;
+
+    private final Counter processSuccessCounter;
+    private final Counter processFailureCounter;
+    private final Counter processIdempotentCounter;
+    private final Counter processRaceConditionResolvedCounter;
+    private final Counter compensateSuccessCounter;
+    private final Counter compensateIdempotentCounter;
+    private final Counter compensateFailureCounter;
+    private final Timer processingTimer;
+
+    public DebitCreditNoteProcessingService(
+            ProcessedDebitCreditNoteRepository noteRepository,
+            DebitCreditNoteParserPort parserService,
+            DebitCreditNoteEventPublishingPort eventPublisher,
+            SagaReplyPort sagaReplyPort,
+            MeterRegistry meterRegistry,
+            PlatformTransactionManager transactionManager) {
+        this.noteRepository = noteRepository;
+        this.parserService = parserService;
+        this.eventPublisher = eventPublisher;
+        this.sagaReplyPort = sagaReplyPort;
+        this.meterRegistry = meterRegistry;
+
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.requiresNewTemplate = template;
+
+        this.processSuccessCounter = Counter.builder("debitcreditnote.processing.success")
+            .description("Number of successfully processed debit/credit notes")
+            .register(meterRegistry);
+        this.processFailureCounter = Counter.builder("debitcreditnote.processing.failure")
+            .description("Number of failed debit/credit note processing attempts")
+            .register(meterRegistry);
+        this.processIdempotentCounter = Counter.builder("debitcreditnote.processing.idempotent")
+            .description("Number of duplicate processing requests handled idempotently")
+            .register(meterRegistry);
+        this.processRaceConditionResolvedCounter = Counter.builder("debitcreditnote.processing.race_condition_resolved")
+            .description("Number of DuplicateKeyExceptions on source_note_id resolved as concurrent inserts")
+            .register(meterRegistry);
+        this.compensateSuccessCounter = Counter.builder("debitcreditnote.compensation.success")
+            .description("Number of successful compensations")
+            .register(meterRegistry);
+        this.compensateIdempotentCounter = Counter.builder("debitcreditnote.compensation.idempotent")
+            .description("Number of duplicate compensation commands for already-deleted notes")
+            .register(meterRegistry);
+        this.compensateFailureCounter = Counter.builder("debitcreditnote.compensation.failure")
+            .description("Number of failed compensation attempts")
+            .register(meterRegistry);
+        this.processingTimer = Timer.builder("debitcreditnote.processing.duration")
+            .description("Time taken to process debit/credit notes")
+            .register(meterRegistry);
+    }
+
+    @Override
+    @Transactional
+    public void process(String documentId, String xmlContent,
+                         String sagaId, SagaStep sagaStep, String correlationId) throws ProcessingException {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            processNoteInternal(documentId, xmlContent, sagaId, sagaStep, correlationId);
+        } catch (DebitCreditNoteParserPort.ParsingException e) {
+            processFailureCounter.increment();
+            sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId, "Parse error: " + e.toString());
+            throw new ProcessingException("Failed to parse debit/credit note: " + e.toString(), e);
+        } catch (DuplicateKeyException e) {
+            if (!isSourceNoteIdViolation(e)) {
+                processFailureCounter.increment();
+                log.error("Duplicate key violation on non-idempotent constraint for document {}, saga {}: {}",
+                        documentId, sagaId, e.toString());
+                sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId,
+                        "Constraint violation for document " + documentId + ": " + e.toString());
+                throw new ProcessingException(
+                        "Constraint violation for document " + documentId, e);
+            }
+
+            log.warn("DuplicateKeyException on source_note_id for document {}, saga {} — re-checking for concurrent insert",
+                    documentId, sagaId);
+            requiresNewTemplate.execute(txStatus -> {
+                Optional<ProcessedDebitCreditNote> existing = noteRepository.findBySourceNoteId(documentId);
+                if (existing.isPresent()) {
+                    log.warn("Race condition resolved: document {} already committed by concurrent thread — replying SUCCESS",
+                            documentId);
+                    processRaceConditionResolvedCounter.increment();
+                    sagaReplyPort.publishSuccess(sagaId, sagaStep, correlationId);
+                } else {
+                    log.error("DuplicateKeyException on source_note_id for document {} but no record found — replying FAILURE",
+                            documentId);
+                    processFailureCounter.increment();
+                    sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId,
+                            "Duplicate key violation for document " + documentId + ": " + e.toString());
+                }
+                return null;
+            });
+            throw new ProcessingException("Concurrent insert for document: " + documentId, e);
+        } catch (DataIntegrityViolationException e) {
+            processFailureCounter.increment();
+            log.error("Constraint violation (non-duplicate-key) for document {}, saga {}: {}",
+                    documentId, sagaId, e.toString());
+            sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId,
+                    "Constraint violation for document " + documentId + ": " + e.toString());
+            throw new ProcessingException(
+                    "Constraint violation for document " + documentId, e);
+        } catch (Exception e) {
+            processFailureCounter.increment();
+            sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId,
+                    "Processing error for document " + documentId + ": " + e.toString());
+            throw new ProcessingException(
+                    "Failed to process debit/credit note " + documentId + ": " + e.toString(), e);
+        } finally {
+            sample.stop(processingTimer);
+        }
+    }
+
+    private ProcessedDebitCreditNote processNoteInternal(String documentId, String xmlContent,
+                                                          String sagaId, SagaStep sagaStep, String correlationId)
+            throws DebitCreditNoteParserPort.ParsingException {
+        log.info("Processing debit/credit note for saga, document: {}", documentId);
+
+        Optional<ProcessedDebitCreditNote> existing = noteRepository.findBySourceNoteId(documentId);
+        if (existing.isPresent()) {
+            ProcessedDebitCreditNote existingNote = existing.get();
+
+            if (existingNote.getStatus() == ProcessingStatus.COMPLETED) {
+                log.warn("Debit/credit note already completed for document {}, returning idempotent success", documentId);
+                processIdempotentCounter.increment();
+                sagaReplyPort.publishSuccess(sagaId, sagaStep, correlationId);
+                return existingNote;
+            }
+
+            if (existingNote.getStatus() == ProcessingStatus.PROCESSING) {
+                log.warn("Debit/credit note for document {} found in PROCESSING state — previous attempt "
+                        + "failed mid-flight; resuming completion", documentId);
+                existingNote.markCompleted();
+                noteRepository.save(existingNote);
+                DebitCreditNoteProcessedDomainEvent domainEvent = DebitCreditNoteProcessedDomainEvent.of(
+                    existingNote.getSourceNoteId(),
+                    existingNote.getNoteNumber(),
+                    existingNote.getTotal(),
+                    sagaId,
+                    correlationId
+                );
+                eventPublisher.publish(domainEvent);
+                sagaReplyPort.publishSuccess(sagaId, sagaStep, correlationId);
+                processSuccessCounter.increment();
+                log.info("Resumed and completed debit/credit note: {}", existingNote.getNoteNumber());
+                return existingNote;
+            }
+
+            throw new IllegalStateException(
+                "Debit/credit note for document " + documentId + " has unexpected persisted status: "
+                    + existingNote.getStatus());
+        }
+
+        ProcessedDebitCreditNote note = parserService.parse(xmlContent, documentId);
+
+        note.startProcessing();
+        ProcessedDebitCreditNote saved = noteRepository.save(note);
+
+        log.info("Saved processed debit/credit note: {}", saved.getNoteNumber());
+
+        saved.markCompleted();
+        noteRepository.save(saved);
+
+        DebitCreditNoteProcessedDomainEvent domainEvent = DebitCreditNoteProcessedDomainEvent.of(
+            saved.getSourceNoteId(),
+            saved.getNoteNumber(),
+            saved.getTotal(),
+            sagaId,
+            correlationId
+        );
+        eventPublisher.publish(domainEvent);
+
+        sagaReplyPort.publishSuccess(sagaId, sagaStep, correlationId);
+
+        processSuccessCounter.increment();
+        log.info("Successfully processed debit/credit note: {}", saved.getNoteNumber());
+        return saved;
+    }
+
+    @Override
+    @Transactional
+    public void compensate(String documentId, String sagaId, SagaStep sagaStep, String correlationId) {
+        log.info("Compensating debit/credit note for document: {}", documentId);
+
+        try {
+            Optional<ProcessedDebitCreditNote> existing = noteRepository.findBySourceNoteId(documentId);
+            if (existing.isPresent()) {
+                noteRepository.deleteById(existing.get().getId());
+                log.info("Deleted debit/credit note for document: {}", documentId);
+            } else {
+                compensateIdempotentCounter.increment();
+                log.warn("Debit/credit note not found for compensation of document {} saga {} — "
+                    + "treating as idempotent duplicate (already compensated or never processed)",
+                    documentId, sagaId);
+            }
+
+            sagaReplyPort.publishCompensated(sagaId, sagaStep, correlationId);
+            compensateSuccessCounter.increment();
+        } catch (Exception e) {
+            compensateFailureCounter.increment();
+            log.error("Failed to compensate debit/credit note for saga {}: {}", sagaId, e.toString(), e);
+            sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId, "Compensation failed: " + e.toString());
+            throw new CompensationException(
+                    "Compensation failed for document " + documentId, e);
+        }
+    }
+
+    private static boolean isSourceNoteIdViolation(DuplicateKeyException e) {
+        Throwable cause = e.getMostSpecificCause();
+        String msg = cause.getMessage();
+        if (msg == null || !msg.contains("uq_processed_debit_credit_notes_source_note_id")) {
+            return false;
+        }
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException sqlEx && "23505".equals(sqlEx.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+```
+
+- [ ] **Step 2: Write DebitCreditNoteProcessingServiceTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/application/service/DebitCreditNoteProcessingServiceTest.java
+package com.wpanther.debitcreditnote.processing.application.service;
+
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.debitcreditnote.processing.application.port.in.CompensateDebitCreditNoteUseCase;
+import com.wpanther.debitcreditnote.processing.application.port.in.ProcessDebitCreditNoteUseCase;
+import com.wpanther.debitcreditnote.processing.application.port.out.SagaReplyPort;
+import com.wpanther.debitcreditnote.processing.application.port.out.DebitCreditNoteEventPublishingPort;
+import com.wpanther.debitcreditnote.processing.domain.event.DebitCreditNoteProcessedDomainEvent;
+import com.wpanther.debitcreditnote.processing.domain.model.*;
+import com.wpanther.debitcreditnote.processing.domain.port.out.ProcessedDebitCreditNoteRepository;
+import com.wpanther.debitcreditnote.processing.domain.port.out.DebitCreditNoteParserPort;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.math.BigDecimal;
+import java.sql.SQLException;
+import java.time.LocalDate;
+import java.util.Optional;
+
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class DebitCreditNoteProcessingServiceTest {
+
+    @Mock
+    private ProcessedDebitCreditNoteRepository noteRepository;
+
+    @Mock
+    private DebitCreditNoteParserPort parserService;
+
+    @Mock
+    private DebitCreditNoteEventPublishingPort eventPublisher;
+
+    @Mock
+    private SagaReplyPort sagaReplyPort;
+
+    @Mock
+    private PlatformTransactionManager transactionManager;
+
+    private DebitCreditNoteProcessingService service;
+
+    private ProcessedDebitCreditNote validNote;
+
+    @BeforeEach
+    void setUp() {
+        service = new DebitCreditNoteProcessingService(
+            noteRepository,
+            parserService,
+            eventPublisher,
+            sagaReplyPort,
+            new SimpleMeterRegistry(),
+            transactionManager
+        );
+
+        Party seller = Party.of(
+            "Seller Company",
+            TaxIdentifier.of("1234567890", "VAT"),
+            new Address("123 Street", "Bangkok", "10110", "TH"),
+            null
+        );
+
+        Party buyer = Party.of(
+            "Buyer Company",
+            TaxIdentifier.of("9876543210", "VAT"),
+            new Address("456 Road", "Chiang Mai", "50000", "TH"),
+            null
+        );
+
+        LineItem item = new LineItem(
+            "Service 1",
+            10,
+            Money.of(new BigDecimal("1000.00"), "THB"),
+            new BigDecimal("7.00")
+        );
+
+        validNote = ProcessedDebitCreditNote.builder()
+            .id(DebitCreditNoteId.generate())
+            .sourceNoteId("intake-123")
+            .noteNumber("CN-001")
+            .noteType("DEBIT")
+            .issueDate(LocalDate.of(2025, 1, 1))
+            .dueDate(LocalDate.of(2025, 2, 1))
+            .seller(seller)
+            .buyer(buyer)
+            .addItem(item)
+            .currency("THB")
+            .originalXml("<xml>test</xml>")
+            .build();
+    }
+
+    @Test
+    void testProcessNoteSuccess() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserService.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any(ProcessedDebitCreditNote.class))).thenReturn(validNote);
+
+        service.process("intake-123", "<xml>test</xml>", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+
+        verify(noteRepository).findBySourceNoteId("intake-123");
+        verify(parserService).parse("<xml>test</xml>", "intake-123");
+        verify(noteRepository, times(2)).save(any(ProcessedDebitCreditNote.class));
+        verify(eventPublisher).publish(any(DebitCreditNoteProcessedDomainEvent.class));
+        verify(sagaReplyPort).publishSuccess("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+    }
+
+    @Test
+    void testProcessNoteAlreadyCompleted() throws Exception {
+        ProcessedDebitCreditNote completedNote = ProcessedDebitCreditNote.builder()
+            .id(DebitCreditNoteId.generate())
+            .sourceNoteId("intake-123")
+            .noteNumber("CN-001")
+            .noteType("DEBIT")
+            .issueDate(LocalDate.of(2025, 1, 1))
+            .dueDate(LocalDate.of(2025, 2, 1))
+            .seller(Party.of("Seller", TaxIdentifier.of("1234567890", "VAT"),
+                new Address("123 St", "Bangkok", "10110", "TH"), null))
+            .buyer(Party.of("Buyer", TaxIdentifier.of("9876543210", "VAT"),
+                new Address("456 Rd", "Chiang Mai", "50000", "TH"), null))
+            .addItem(new LineItem("S1", 10, Money.of(new BigDecimal("1000.00"), "THB"), new BigDecimal("7.00")))
+            .currency("THB").originalXml("<xml/>")
+            .status(ProcessingStatus.COMPLETED)
+            .build();
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.of(completedNote));
+
+        service.process("intake-123", "<xml>test</xml>", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+
+        verify(parserService, never()).parse(anyString(), anyString());
+        verify(noteRepository, never()).save(any(ProcessedDebitCreditNote.class));
+        verify(eventPublisher, never()).publish(any());
+        verify(sagaReplyPort).publishSuccess("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+    }
+
+    @Test
+    void testProcessNoteResumesFromProcessingState() throws Exception {
+        ProcessedDebitCreditNote processingNote = ProcessedDebitCreditNote.builder()
+            .id(DebitCreditNoteId.generate())
+            .sourceNoteId("intake-123")
+            .noteNumber("CN-001")
+            .noteType("DEBIT")
+            .issueDate(LocalDate.of(2025, 1, 1))
+            .dueDate(LocalDate.of(2025, 2, 1))
+            .seller(Party.of("Seller", TaxIdentifier.of("1234567890", "VAT"),
+                new Address("123 St", "Bangkok", "10110", "TH"), null))
+            .buyer(Party.of("Buyer", TaxIdentifier.of("9876543210", "VAT"),
+                new Address("456 Rd", "Chiang Mai", "50000", "TH"), null))
+            .addItem(new LineItem("S1", 10, Money.of(new BigDecimal("1000.00"), "THB"), new BigDecimal("7.00")))
+            .currency("THB").originalXml("<xml/>")
+            .status(ProcessingStatus.PROCESSING)
+            .build();
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.of(processingNote));
+
+        service.process("intake-123", "<xml>test</xml>", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+
+        verify(parserService, never()).parse(anyString(), anyString());
+        verify(noteRepository, times(1)).save(any(ProcessedDebitCreditNote.class));
+        verify(eventPublisher).publish(any(DebitCreditNoteProcessedDomainEvent.class));
+        verify(sagaReplyPort).publishSuccess("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+        assertEquals(ProcessingStatus.COMPLETED, processingNote.getStatus());
+    }
+
+    @Test
+    void testProcessNoteParsingError() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserService.parse(anyString(), anyString()))
+            .thenThrow(new DebitCreditNoteParserPort.ParsingException("Parse error"));
+
+        assertThrows(ProcessDebitCreditNoteUseCase.ProcessingException.class,
+            () -> service.process("intake-123", "<xml>test</xml>", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123"));
+
+        verify(noteRepository, never()).save(any(ProcessedDebitCreditNote.class));
+        verify(eventPublisher, never()).publish(any());
+        verify(sagaReplyPort).publishFailure(eq("saga-1"), eq(SagaStep.PROCESS_DEBIT_CREDIT_NOTE), eq("correlation-123"), contains("Parse error"));
+    }
+
+    @Test
+    void testProcessNotePublishesCorrectEvent() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserService.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any(ProcessedDebitCreditNote.class))).thenReturn(validNote);
+
+        service.process("intake-123", "<xml>test</xml>", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+
+        ArgumentCaptor<DebitCreditNoteProcessedDomainEvent> eventCaptor =
+            ArgumentCaptor.forClass(DebitCreditNoteProcessedDomainEvent.class);
+        verify(eventPublisher).publish(eventCaptor.capture());
+
+        DebitCreditNoteProcessedDomainEvent event = eventCaptor.getValue();
+        assertEquals("CN-001", event.documentNumber());
+        assertEquals("THB", event.total().currency());
+        assertEquals("correlation-123", event.correlationId());
+    }
+
+    @Test
+    void testProcessNoteSavesTwice() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserService.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any(ProcessedDebitCreditNote.class))).thenReturn(validNote);
+
+        service.process("intake-123", "<xml>test</xml>", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+
+        verify(noteRepository, times(2)).save(any(ProcessedDebitCreditNote.class));
+    }
+
+    @Test
+    void testProcessNoteDatabaseError() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserService.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any(ProcessedDebitCreditNote.class)))
+            .thenThrow(new RuntimeException("Database error"));
+
+        assertThrows(ProcessDebitCreditNoteUseCase.ProcessingException.class,
+            () -> service.process("intake-123", "<xml>test</xml>", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123"));
+
+        verify(sagaReplyPort).publishFailure(eq("saga-1"), eq(SagaStep.PROCESS_DEBIT_CREDIT_NOTE), eq("correlation-123"), contains("Processing error"));
+        verify(eventPublisher, never()).publish(any());
+    }
+
+    @Test
+    void testCompensateDeletesExistingNote() {
+        when(noteRepository.findBySourceNoteId("intake-123")).thenReturn(Optional.of(validNote));
+
+        service.compensate("intake-123", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+
+        verify(noteRepository).findBySourceNoteId("intake-123");
+        verify(noteRepository).deleteById(validNote.getId());
+        verify(sagaReplyPort).publishCompensated("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+    }
+
+    @Test
+    void testCompensateNotFound() {
+        when(noteRepository.findBySourceNoteId("intake-notfound")).thenReturn(Optional.empty());
+
+        service.compensate("intake-notfound", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+
+        verify(noteRepository).findBySourceNoteId("intake-notfound");
+        verify(noteRepository, never()).deleteById(any());
+        verify(sagaReplyPort).publishCompensated("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1");
+    }
+
+    @Test
+    void testCompensateHandlesException() {
+        when(noteRepository.findBySourceNoteId("intake-123")).thenReturn(Optional.of(validNote));
+        doThrow(new RuntimeException("DB error")).when(noteRepository).deleteById(any());
+
+        assertThrows(CompensateDebitCreditNoteUseCase.CompensationException.class,
+            () -> service.compensate("intake-123", "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "corr-1"));
+
+        verify(sagaReplyPort).publishFailure(eq("saga-1"), eq(SagaStep.PROCESS_DEBIT_CREDIT_NOTE), eq("corr-1"), contains("Compensation failed"));
+    }
+
+    @Test
+    void testProcessNoteRaceConditionResolvesAsSuccess() throws Exception {
+        SQLException sqlCause = new SQLException(
+            "ERROR: duplicate key value violates unique constraint" +
+            " \"uq_processed_debit_credit_notes_source_note_id\"", "23505");
+        when(transactionManager.getTransaction(any())).thenReturn(mock(TransactionStatus.class));
+        when(noteRepository.findBySourceNoteId(anyString()))
+            .thenReturn(Optional.empty())
+            .thenReturn(Optional.of(validNote));
+        when(parserService.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any(ProcessedDebitCreditNote.class)))
+            .thenThrow(new DuplicateKeyException("duplicate key", sqlCause));
+
+        ProcessDebitCreditNoteUseCase.ProcessingException ex =
+            assertThrows(ProcessDebitCreditNoteUseCase.ProcessingException.class,
+                () -> service.process("intake-123", "<xml>test</xml>",
+                                      "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123"));
+        assertInstanceOf(DataIntegrityViolationException.class, ex.getCause());
+
+        verify(sagaReplyPort).publishSuccess("saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123");
+        verify(sagaReplyPort, never()).publishFailure(any(), any(), any(), any());
+        verify(eventPublisher, never()).publish(any());
+    }
+
+    @Test
+    void testProcessNoteDataIntegrityViolation() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserService.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any(ProcessedDebitCreditNote.class)))
+            .thenThrow(new DataIntegrityViolationException(
+                "value too long for type character varying(500)"));
+
+        ProcessDebitCreditNoteUseCase.ProcessingException ex =
+            assertThrows(ProcessDebitCreditNoteUseCase.ProcessingException.class,
+                () -> service.process("intake-123", "<xml>test</xml>",
+                                      "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123"));
+        assertInstanceOf(DataIntegrityViolationException.class, ex.getCause());
+        assertTrue(ex.getMessage().contains("Constraint violation"));
+
+        verify(sagaReplyPort).publishFailure(
+            eq("saga-1"), eq(SagaStep.PROCESS_DEBIT_CREDIT_NOTE), eq("correlation-123"),
+            contains("Constraint violation"));
+        verify(transactionManager, never()).getTransaction(any());
+        verify(eventPublisher, never()).publish(any());
+    }
+
+    @Test
+    void testProcessNoteDuplicateKeyOnNonIdempotentConstraint() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserService.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any(ProcessedDebitCreditNote.class)))
+            .thenThrow(new DuplicateKeyException(
+                "duplicate key value violates unique constraint \"idx_note_number_unique\""));
+
+        ProcessDebitCreditNoteUseCase.ProcessingException ex =
+            assertThrows(ProcessDebitCreditNoteUseCase.ProcessingException.class,
+                () -> service.process("intake-123", "<xml>test</xml>",
+                                      "saga-1", SagaStep.PROCESS_DEBIT_CREDIT_NOTE, "correlation-123"));
+        assertInstanceOf(DuplicateKeyException.class, ex.getCause());
+        assertTrue(ex.getMessage().contains("Constraint violation"));
+
+        verify(sagaReplyPort).publishFailure(
+            eq("saga-1"), eq(SagaStep.PROCESS_DEBIT_CREDIT_NOTE), eq("correlation-123"),
+            contains("Constraint violation"));
+        verify(sagaReplyPort, never()).publishSuccess(any(), any(), any());
+        verify(noteRepository, times(1)).findBySourceNoteId(anyString());
+        verify(eventPublisher, never()).publish(any());
+    }
+}
+```
+
+- [ ] **Step 3: Delete old domain service and repository, then commit**
+
+```bash
+git add src/main/java/com/wpanther/debitcreditnote/processing/application/service/DebitCreditNoteProcessingService.java \
+       src/test/java/com/wpanther/debitcreditnote/processing/application/service/DebitCreditNoteProcessingServiceTest.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/domain/service/DebitCreditNoteParserService.java
+git rm src/main/java/com/wpanther/debitcreditnote/processing/domain/repository/ProcessedDebitCreditNoteRepository.java
+git commit -m "Rewrite DebitCreditNoteProcessingService with metrics, REQUIRES_NEW, and full test suite"
+```
+
+---
+
+## Task 20: Domain model unit tests
+
+**What:** Write unit tests for all 9 domain model classes: `DebitCreditNoteId`, `Money`, `Address`, `TaxIdentifier`, `Party`, `LineItem`, `ProcessedDebitCreditNote`, `ProcessingStatus`. These tests cover construction, validation, state transitions, equality, and edge cases.
+
+**Files:**
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/domain/model/DebitCreditNoteIdTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/domain/model/MoneyTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/domain/model/AddressTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/domain/model/TaxIdentifierTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/domain/model/PartyTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/domain/model/LineItemTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/domain/model/ProcessedDebitCreditNoteTest.java`
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/domain/model/ProcessingStatusTest.java`
+
+- [ ] **Step 1: Write DebitCreditNoteIdTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/domain/model/DebitCreditNoteIdTest.java
+package com.wpanther.debitcreditnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class DebitCreditNoteIdTest {
+
+    @Test
+    void generate_createsNonNullId() {
+        DebitCreditNoteId id = DebitCreditNoteId.generate();
+        assertNotNull(id);
+        assertNotNull(id.getValue());
+    }
+
+    @Test
+    void generate_createsUniqueIds() {
+        DebitCreditNoteId id1 = DebitCreditNoteId.generate();
+        DebitCreditNoteId id2 = DebitCreditNoteId.generate();
+        assertNotEquals(id1, id2);
+    }
+
+    @Test
+    void ofUuid_createsIdWithValue() {
+        UUID uuid = UUID.randomUUID();
+        DebitCreditNoteId id = DebitCreditNoteId.of(uuid);
+        assertEquals(uuid, id.getValue());
+    }
+
+    @Test
+    void ofString_createsIdFromUuidString() {
+        UUID uuid = UUID.randomUUID();
+        DebitCreditNoteId id = DebitCreditNoteId.of(uuid.toString());
+        assertEquals(uuid, id.getValue());
+    }
+
+    @Test
+    void ofNull_throwsNPE() {
+        assertThrows(NullPointerException.class, () -> DebitCreditNoteId.of((UUID) null));
+    }
+
+    @Test
+    void equals_sameValue() {
+        UUID uuid = UUID.randomUUID();
+        DebitCreditNoteId id1 = DebitCreditNoteId.of(uuid);
+        DebitCreditNoteId id2 = DebitCreditNoteId.of(uuid);
+        assertEquals(id1, id2);
+        assertEquals(id1.hashCode(), id2.hashCode());
+    }
+
+    @Test
+    void toString_returnsUuidString() {
+        UUID uuid = UUID.randomUUID();
+        DebitCreditNoteId id = DebitCreditNoteId.of(uuid);
+        assertEquals(uuid.toString(), id.toString());
+    }
+}
+```
+
+- [ ] **Step 2: Write MoneyTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/domain/model/MoneyTest.java
+package com.wpanther.debitcreditnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class MoneyTest {
+
+    @Test
+    void of_createsMoney() {
+        Money money = Money.of(new BigDecimal("100.00"), "THB");
+        assertEquals(new BigDecimal("100.00"), money.amount());
+        assertEquals("THB", money.currency());
+    }
+
+    @Test
+    void of_invalidCurrency_throws() {
+        assertThrows(IllegalArgumentException.class,
+            () -> Money.of(BigDecimal.ONE, "INVALID"));
+    }
+
+    @Test
+    void of_nullAmount_throws() {
+        assertThrows(NullPointerException.class,
+            () -> Money.of(null, "THB"));
+    }
+
+    @Test
+    void add_sameCurrency() {
+        Money a = Money.of(new BigDecimal("100.00"), "THB");
+        Money b = Money.of(new BigDecimal("50.00"), "THB");
+        Money result = a.add(b);
+        assertEquals(new BigDecimal("150.00"), result.amount());
+        assertEquals("THB", result.currency());
+    }
+
+    @Test
+    void add_differentCurrency_throws() {
+        Money thb = Money.of(BigDecimal.ONE, "THB");
+        Money usd = Money.of(BigDecimal.ONE, "USD");
+        assertThrows(IllegalArgumentException.class, () -> thb.add(usd));
+    }
+
+    @Test
+    void subtract_sameCurrency() {
+        Money a = Money.of(new BigDecimal("100.00"), "THB");
+        Money b = Money.of(new BigDecimal("30.00"), "THB");
+        Money result = a.subtract(b);
+        assertEquals(new BigDecimal("70.00"), result.amount());
+    }
+
+    @Test
+    void multiply_returnsScaledResult() {
+        Money money = Money.of(new BigDecimal("100.00"), "THB");
+        Money result = money.multiply(BigDecimal.valueOf(7));
+        assertEquals(new BigDecimal("700.00"), result.amount());
+    }
+
+    @Test
+    void zero_createsZeroAmount() {
+        Money zero = Money.zero("THB");
+        assertEquals(BigDecimal.ZERO, zero.amount());
+        assertEquals("THB", zero.currency());
+    }
+}
+```
+
+- [ ] **Step 3: Write AddressTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/domain/model/AddressTest.java
+package com.wpanther.debitcreditnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class AddressTest {
+
+    @Test
+    void of_createsAddress() {
+        Address addr = Address.of("123 Street", "Bangkok", "10110", "TH");
+        assertEquals("123 Street", addr.street());
+        assertEquals("Bangkok", addr.city());
+        assertEquals("10110", addr.postalCode());
+        assertEquals("TH", addr.country());
+    }
+
+    @Test
+    void of_nullCountry_throws() {
+        assertThrows(NullPointerException.class,
+            () -> Address.of("Street", "City", "12345", null));
+    }
+
+    @Test
+    void record_equality() {
+        Address a1 = Address.of("123 St", "Bangkok", "10110", "TH");
+        Address a2 = Address.of("123 St", "Bangkok", "10110", "TH");
+        assertEquals(a1, a2);
+    }
+}
+```
+
+- [ ] **Step 4: Write TaxIdentifierTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/domain/model/TaxIdentifierTest.java
+package com.wpanther.debitcreditnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class TaxIdentifierTest {
+
+    @Test
+    void of_createsTaxId() {
+        TaxIdentifier taxId = TaxIdentifier.of("1234567890", "VAT");
+        assertEquals("1234567890", taxId.taxId());
+        assertEquals("VAT", taxId.scheme());
+    }
+
+    @Test
+    void of_nullTaxId_throws() {
+        assertThrows(NullPointerException.class,
+            () -> TaxIdentifier.of(null, "VAT"));
+    }
+
+    @Test
+    void of_nullScheme_throws() {
+        assertThrows(NullPointerException.class,
+            () -> TaxIdentifier.of("1234567890", null));
+    }
+
+    @Test
+    void record_equality() {
+        TaxIdentifier t1 = TaxIdentifier.of("1234567890", "VAT");
+        TaxIdentifier t2 = TaxIdentifier.of("1234567890", "VAT");
+        assertEquals(t1, t2);
+    }
+}
+```
+
+- [ ] **Step 5: Write PartyTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/domain/model/PartyTest.java
+package com.wpanther.debitcreditnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class PartyTest {
+
+    private final Address address = Address.of("123 St", "Bangkok", "10110", "TH");
+    private final TaxIdentifier taxId = TaxIdentifier.of("1234567890", "VAT");
+
+    @Test
+    void of_createsParty() {
+        Party party = Party.of("Company", taxId, address, "test@example.com");
+        assertEquals("Company", party.name());
+        assertEquals(taxId, party.taxIdentifier());
+        assertEquals(address, party.address());
+        assertEquals("test@example.com", party.email());
+    }
+
+    @Test
+    void of_nullEmail_isAllowed() {
+        Party party = Party.of("Company", taxId, address, null);
+        assertNull(party.email());
+    }
+
+    @Test
+    void of_nullName_throws() {
+        assertThrows(NullPointerException.class,
+            () -> Party.of(null, taxId, address, null));
+    }
+
+    @Test
+    void of_nullTaxId_throws() {
+        assertThrows(NullPointerException.class,
+            () -> Party.of("Company", null, address, null));
+    }
+
+    @Test
+    void of_nullAddress_throws() {
+        assertThrows(NullPointerException.class,
+            () -> Party.of("Company", taxId, null, null));
+    }
+}
+```
+
+- [ ] **Step 6: Write LineItemTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/domain/model/LineItemTest.java
+package com.wpanther.debitcreditnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class LineItemTest {
+
+    private final Money unitPrice = Money.of(new BigDecimal("100.00"), "THB");
+
+    @Test
+    void construction_setsFields() {
+        LineItem item = new LineItem("Service", 10, unitPrice, new BigDecimal("7.00"));
+        assertEquals("Service", item.description());
+        assertEquals(10, item.quantity());
+        assertEquals(unitPrice, item.unitPrice());
+        assertEquals(new BigDecimal("7.00"), item.taxRate());
+    }
+
+    @Test
+    void construction_zeroQuantity_throws() {
+        assertThrows(IllegalArgumentException.class,
+            () -> new LineItem("Service", 0, unitPrice, new BigDecimal("7.00")));
+    }
+
+    @Test
+    void construction_negativeQuantity_throws() {
+        assertThrows(IllegalArgumentException.class,
+            () -> new LineItem("Service", -1, unitPrice, new BigDecimal("7.00")));
+    }
+
+    @Test
+    void construction_nullDescription_throws() {
+        assertThrows(NullPointerException.class,
+            () -> new LineItem(null, 10, unitPrice, new BigDecimal("7.00")));
+    }
+
+    @Test
+    void getLineTotal_returnsQuantityTimesPrice() {
+        LineItem item = new LineItem("Service", 10, unitPrice, new BigDecimal("7.00"));
+        Money lineTotal = item.getLineTotal();
+        assertEquals(new BigDecimal("1000.00"), lineTotal.amount());
+    }
+
+    @Test
+    void getTaxAmount_returnsCorrectTax() {
+        LineItem item = new LineItem("Service", 10, unitPrice, new BigDecimal("7.00"));
+        Money tax = item.getTaxAmount();
+        assertEquals(new BigDecimal("70.0000"), tax.amount());
+    }
+
+    @Test
+    void getTotalWithTax_returnsLineTotalPlusTax() {
+        LineItem item = new LineItem("Service", 10, unitPrice, new BigDecimal("7.00"));
+        Money total = item.getTotalWithTax();
+        assertEquals(new BigDecimal("1070.0000"), total.amount());
+    }
+}
+```
+
+- [ ] **Step 7: Write ProcessedDebitCreditNoteTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/domain/model/ProcessedDebitCreditNoteTest.java
+package com.wpanther.debitcreditnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class ProcessedDebitCreditNoteTest {
+
+    private ProcessedDebitCreditNote.Builder validBuilder() {
+        Party seller = Party.of("Seller", TaxIdentifier.of("1234567890", "VAT"),
+            new Address("123 St", "Bangkok", "10110", "TH"), null);
+        Party buyer = Party.of("Buyer", TaxIdentifier.of("9876543210", "VAT"),
+            new Address("456 Rd", "Chiang Mai", "50000", "TH"), null);
+        return ProcessedDebitCreditNote.builder()
+            .id(DebitCreditNoteId.generate())
+            .sourceNoteId("src-1")
+            .noteNumber("CN-001")
+            .noteType("DEBIT")
+            .issueDate(LocalDate.of(2025, 1, 1))
+            .dueDate(LocalDate.of(2025, 2, 1))
+            .seller(seller)
+            .buyer(buyer)
+            .addItem(new LineItem("S1", 10, Money.of(new BigDecimal("100.00"), "THB"), new BigDecimal("7.00")))
+            .currency("THB")
+            .originalXml("<xml/>");
+    }
+
+    @Test
+    void build_createsNoteInPendingStatus() {
+        ProcessedDebitCreditNote note = validBuilder().build();
+        assertEquals(ProcessingStatus.PENDING, note.getStatus());
+    }
+
+    @Test
+    void startProcessing_transitionsToProcessing() {
+        ProcessedDebitCreditNote note = validBuilder().build();
+        note.startProcessing();
+        assertEquals(ProcessingStatus.PROCESSING, note.getStatus());
+    }
+
+    @Test
+    void startProcessing_fromNonPending_throws() {
+        ProcessedDebitCreditNote note = validBuilder().build();
+        note.startProcessing();
+        assertThrows(IllegalStateException.class, note::startProcessing);
+    }
+
+    @Test
+    void markCompleted_transitionsToCompleted() {
+        ProcessedDebitCreditNote note = validBuilder().build();
+        note.startProcessing();
+        note.markCompleted();
+        assertEquals(ProcessingStatus.COMPLETED, note.getStatus());
+        assertNotNull(note.getCompletedAt());
+    }
+
+    @Test
+    void markCompleted_fromPending_throws() {
+        ProcessedDebitCreditNote note = validBuilder().build();
+        assertThrows(IllegalStateException.class, note::markCompleted);
+    }
+
+    @Test
+    void markFailed_setsError() {
+        ProcessedDebitCreditNote note = validBuilder().build();
+        note.markFailed("some error");
+        assertEquals(ProcessingStatus.FAILED, note.getStatus());
+        assertEquals("some error", note.getErrorMessage());
+    }
+
+    @Test
+    void getSubtotal_sumsLineTotals() {
+        ProcessedDebitCreditNote note = validBuilder()
+            .addItem(new LineItem("S2", 5, Money.of(new BigDecimal("200.00"), "THB"), new BigDecimal("7.00")))
+            .build();
+        assertEquals(new BigDecimal("2000.00"), note.getSubtotal().amount());
+    }
+
+    @Test
+    void getTotalTax_sumsTaxAmounts() {
+        ProcessedDebitCreditNote note = validBuilder()
+            .addItem(new LineItem("S2", 5, Money.of(new BigDecimal("200.00"), "THB"), new BigDecimal("7.00")))
+            .build();
+        assertEquals(new BigDecimal("140.0000"), note.getTotalTax().amount());
+    }
+
+    @Test
+    void getTotal_returnsSubtotalPlusTax() {
+        ProcessedDebitCreditNote note = validBuilder().build();
+        assertEquals(note.getSubtotal().add(note.getTotalTax()), note.getTotal());
+    }
+
+    @Test
+    void build_emptyItems_throws() {
+        assertThrows(IllegalStateException.class, () -> validBuilder().items(java.util.List.of()).build());
+    }
+
+    @Test
+    void build_dueDateBeforeIssueDate_throws() {
+        assertThrows(IllegalStateException.class, () -> validBuilder()
+            .issueDate(LocalDate.of(2025, 6, 1))
+            .dueDate(LocalDate.of(2025, 5, 1))
+            .build());
+    }
+
+    @Test
+    void build_currencyMismatch_throws() {
+        assertThrows(IllegalStateException.class, () -> validBuilder()
+            .addItem(new LineItem("S2", 1, Money.of(BigDecimal.ONE, "USD"), BigDecimal.ZERO))
+            .build());
+    }
+
+    @Test
+    void getItems_returnsUnmodifiableList() {
+        ProcessedDebitCreditNote note = validBuilder().build();
+        assertThrows(UnsupportedOperationException.class,
+            () -> note.getItems().add(new LineItem("X", 1, Money.of(BigDecimal.ONE, "THB"), BigDecimal.ZERO)));
+    }
+
+    @Test
+    void build_statusOverride() {
+        ProcessedDebitCreditNote note = validBuilder().status(ProcessingStatus.COMPLETED).build();
+        assertEquals(ProcessingStatus.COMPLETED, note.getStatus());
+    }
+}
+```
+
+- [ ] **Step 8: Write ProcessingStatusTest**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/domain/model/ProcessingStatusTest.java
+package com.wpanther.debitcreditnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class ProcessingStatusTest {
+
+    @Test
+    void hasAllExpectedValues() {
+        ProcessingStatus[] values = ProcessingStatus.values();
+        assertEquals(4, values.length);
+        assertNotNull(ProcessingStatus.valueOf("PENDING"));
+        assertNotNull(ProcessingStatus.valueOf("PROCESSING"));
+        assertNotNull(ProcessingStatus.valueOf("COMPLETED"));
+        assertNotNull(ProcessingStatus.valueOf("FAILED"));
+    }
+}
+```
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/test/java/com/wpanther/debitcreditnote/processing/domain/model/
+git commit -m "Add unit tests for all domain model classes"
+```
+
+---
+
+## Task 21: Full `mvn verify` + smoke test
+
+**What:** Run the full Maven verify to confirm compilation, all tests pass, and JaCoCo coverage thresholds are met. Add the `@SpringBootTest` smoke test if not already present. This task validates that all pieces integrate correctly.
+
+**Files:**
+- Create: `src/test/java/com/wpanther/debitcreditnote/processing/DebitCreditNoteProcessingServiceApplicationTest.java`
+
+- [ ] **Step 1: Write smoke test**
+
+```java
+// src/test/java/com/wpanther/debitcreditnote/processing/DebitCreditNoteProcessingServiceApplicationTest.java
+package com.wpanther.debitcreditnote.processing;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+
+@SpringBootTest
+@ActiveProfiles("test")
+class DebitCreditNoteProcessingServiceApplicationTest {
+
+    @Test
+    void contextLoads() {
+        // Smoke test — verifies Spring context starts with H2 + mock Camel
+    }
+}
+```
+
+- [ ] **Step 2: Run full Maven verify**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/debitcreditnote-processing-service
+mvn clean verify -Dspring.profiles.active=test 2>&1 | tail -40
+```
+
+Expected: `BUILD SUCCESS`. All tests pass. JaCoCo coverage meets threshold.
+
+If tests fail, fix the failing test and re-run before committing.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/test/java/com/wpanther/debitcreditnote/processing/DebitCreditNoteProcessingServiceApplicationTest.java
+git commit -m "Add SpringBoot smoke test and verify full build"
+```
+
+---
+
+## Task 22: Delete old domain event files
+
+**What:** Delete the old `domain/event/` files that have been replaced by new locations. After this task, only `DebitCreditNoteProcessedDomainEvent.java` should remain in `domain/event/`. Also delete `infrastructure/messaging/EventPublisher.java` and `infrastructure/messaging/SagaReplyPublisher.java` if they still exist (they were replaced in Tasks 11-12).
+
+**Files:**
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/domain/event/ProcessDebitCreditNoteCommand.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/domain/event/CompensateDebitCreditNoteCommand.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/domain/event/DebitCreditNoteReplyEvent.java`
+- Delete: `src/main/java/com/wpanther/debitcreditnote/processing/domain/event/DebitCreditNoteProcessedEvent.java`
+- Delete (if still present): `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/EventPublisher.java`
+- Delete (if still present): `src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/SagaReplyPublisher.java`
+
+- [ ] **Step 1: Delete old files**
+
+```bash
+git rm src/main/java/com/wpanther/debitcreditnote/processing/domain/event/ProcessDebitCreditNoteCommand.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/domain/event/CompensateDebitCreditNoteCommand.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/domain/event/DebitCreditNoteReplyEvent.java \
+       src/main/java/com/wpanther/debitcreditnote/processing/domain/event/DebitCreditNoteProcessedEvent.java
+
+# Delete old infrastructure/messaging files if they still exist
+git rm -f src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/EventPublisher.java 2>/dev/null || true
+git rm -f src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/messaging/SagaReplyPublisher.java 2>/dev/null || true
+git rm -f src/main/java/com/wpanther/debitcreditnote/processing/infrastructure/service/DebitCreditNoteParserServiceImpl.java 2>/dev/null || true
+```
+
+- [ ] **Step 2: Run mvn verify to confirm nothing is broken**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/debitcreditnote-processing-service
+mvn clean verify -Dspring.profiles.active=test 2>&1 | tail -20
+```
+
+Expected: `BUILD SUCCESS`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git commit -m "Remove old domain/event DTOs and infrastructure files replaced by hexagonal adapters"
+```
