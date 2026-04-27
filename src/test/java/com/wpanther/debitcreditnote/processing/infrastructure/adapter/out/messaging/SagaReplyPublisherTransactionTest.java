@@ -1,10 +1,11 @@
 package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.messaging;
 
+import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox.JpaOutboxEventRepository;
 import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox.OutboxEventEntity;
-import com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox.SpringDataOutboxRepository;
 import com.wpanther.saga.domain.enums.SagaStep;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
@@ -33,20 +34,21 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest
 @ActiveProfiles("test")
+@ExtendWith(com.wpanther.debitcreditnote.processing.util.KafkaAvailableCondition.class)
 class SagaReplyPublisherTransactionTest {
 
     @Autowired
     private SagaReplyPublisher sagaReplyPublisher;
 
     @Autowired
-    private SpringDataOutboxRepository outboxRepository;
+    private JpaOutboxEventRepository jpaOutboxEventRepository;
 
     @Autowired
     private PlatformTransactionManager transactionManager;
 
     @AfterEach
     void cleanup() {
-        outboxRepository.deleteAll();
+        jpaOutboxEventRepository.deleteAllInBatch();
     }
 
     // -------------------------------------------------------------------------
@@ -73,9 +75,7 @@ class SagaReplyPublisherTransactionTest {
         }
 
         // The failure reply outbox entry MUST be committed despite the outer rollback.
-        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
-                .filter(e -> e.getAggregateId().equals(sagaId))
-                .toList();
+        List<OutboxEventEntity> entries = jpaOutboxEventRepository.findByAggregateId(sagaId);
 
         assertFalse(entries.isEmpty(),
                 "publishFailure() must commit its outbox entry in its own transaction " +
@@ -99,9 +99,7 @@ class SagaReplyPublisherTransactionTest {
             // expected
         }
 
-        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
-                .filter(e -> e.getAggregateId().equals(sagaId))
-                .toList();
+        List<OutboxEventEntity> entries = jpaOutboxEventRepository.findByAggregateId(sagaId);
 
         assertFalse(entries.isEmpty(), "outbox entry must exist");
         assertTrue(entries.get(0).getPayload().contains("FAILURE"),
@@ -125,9 +123,7 @@ class SagaReplyPublisherTransactionTest {
             return null;
         });
 
-        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
-                .filter(e -> e.getAggregateId().equals(sagaId))
-                .toList();
+        List<OutboxEventEntity> entries = jpaOutboxEventRepository.findByAggregateId(sagaId);
 
         assertFalse(entries.isEmpty(),
                 "publishCompensated() outbox entry must be committed with the outer transaction");
@@ -151,9 +147,7 @@ class SagaReplyPublisherTransactionTest {
             // expected
         }
 
-        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
-                .filter(e -> e.getAggregateId().equals(sagaId))
-                .toList();
+        List<OutboxEventEntity> entries = jpaOutboxEventRepository.findByAggregateId(sagaId);
 
         assertTrue(entries.isEmpty(),
                 "publishCompensated() outbox entry must be rolled back together with the outer " +
@@ -176,9 +170,7 @@ class SagaReplyPublisherTransactionTest {
             return null;
         });
 
-        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
-                .filter(e -> e.getAggregateId().equals(sagaId))
-                .toList();
+        List<OutboxEventEntity> entries = jpaOutboxEventRepository.findByAggregateId(sagaId);
 
         assertFalse(entries.isEmpty(),
                 "publishSuccess() outbox entry must be committed with the outer transaction");
@@ -202,9 +194,7 @@ class SagaReplyPublisherTransactionTest {
             // expected
         }
 
-        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
-                .filter(e -> e.getAggregateId().equals(sagaId))
-                .toList();
+        List<OutboxEventEntity> entries = jpaOutboxEventRepository.findByAggregateId(sagaId);
 
         assertTrue(entries.isEmpty(),
                 "publishSuccess() outbox entry must be rolled back together with the outer " +

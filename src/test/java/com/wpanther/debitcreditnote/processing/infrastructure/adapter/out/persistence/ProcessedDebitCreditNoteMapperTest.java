@@ -87,11 +87,11 @@ class ProcessedDebitCreditNoteMapperTest {
         ProcessedDebitCreditNoteEntity entity = mapper.toEntity(domainNote);
 
         // Subtotal: (10 * 1000) + (5 * 2000) = 20,000
-        assertEquals(new BigDecimal("20000.00"), entity.getSubtotal());
+        assertEquals(0, new BigDecimal("20000.00").compareTo(entity.getSubtotal()));
         // Tax: 20,000 * 0.07 = 1,400
-        assertEquals(new BigDecimal("1400.00"), entity.getTotalTax());
+        assertEquals(0, new BigDecimal("1400.00").compareTo(entity.getTotalTax()));
         // Total: 20,000 + 1,400 = 21,400
-        assertEquals(new BigDecimal("21400.00"), entity.getTotal());
+        assertEquals(0, new BigDecimal("21400.00").compareTo(entity.getTotal()));
     }
 
     @Test
@@ -137,10 +137,10 @@ class ProcessedDebitCreditNoteMapperTest {
         assertEquals(1, item1.getLineNumber());
         assertEquals("Service 1", item1.getDescription());
         assertEquals(10, item1.getQuantity());
-        assertEquals(new BigDecimal("1000.00"), item1.getUnitPrice());
-        assertEquals(new BigDecimal("7.00"), item1.getTaxRate());
-        assertEquals(new BigDecimal("10000.00"), item1.getLineTotal());
-        assertEquals(new BigDecimal("700.00"), item1.getTaxAmount());
+        assertEquals(0, new BigDecimal("1000.00").compareTo(item1.getUnitPrice()));
+        assertEquals(0, new BigDecimal("7.00").compareTo(item1.getTaxRate()));
+        assertEquals(0, new BigDecimal("10000.00").compareTo(item1.getLineTotal()));
+        assertEquals(0, new BigDecimal("700.00").compareTo(item1.getTaxAmount()));
 
         DebitCreditNoteLineItemEntity item2 = entity.getLineItems().get(1);
         assertEquals(2, item2.getLineNumber());

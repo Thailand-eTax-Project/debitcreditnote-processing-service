@@ -1,12 +1,10 @@
 package com.wpanther.debitcreditnote.processing.infrastructure.adapter.out.persistence.outbox;
 
-import com.wpanther.saga.domain.outbox.OutboxEvent;
 import com.wpanther.saga.domain.outbox.OutboxStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
-import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.test.context.ActiveProfiles;
 
@@ -20,18 +18,12 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Unit tests for JpaOutboxEventRepository
  */
-import org.springframework.context.annotation.Import;
-
 @DataJpaTest
-@Import(JpaOutboxEventRepository.class)
 @ActiveProfiles("test")
 class JpaOutboxEventRepositoryTest {
 
     @Autowired
     private TestEntityManager entityManager;
-
-    @Autowired
-    private SpringDataOutboxRepository springDataOutboxRepository;
 
     @Autowired
     private JpaOutboxEventRepository jpaOutboxEventRepository;
@@ -51,7 +43,7 @@ class JpaOutboxEventRepositoryTest {
                 .build();
 
         // When
-        OutboxEventEntity saved = springDataOutboxRepository.save(event);
+        OutboxEventEntity saved = jpaOutboxEventRepository.save(event);
 
         // Then
         assertNotNull(saved);
@@ -80,7 +72,7 @@ class JpaOutboxEventRepositoryTest {
         entityManager.flush();
 
         // When
-        Optional<OutboxEventEntity> found = springDataOutboxRepository.findById(event.getId());
+        Optional<OutboxEventEntity> found = jpaOutboxEventRepository.findById(event.getId());
 
         // Then
         assertTrue(found.isPresent());
@@ -107,12 +99,12 @@ class JpaOutboxEventRepositoryTest {
         // When
         event.setStatus(OutboxStatus.PUBLISHED);
         event.setPublishedAt(Instant.now());
-        springDataOutboxRepository.save(event);
+        jpaOutboxEventRepository.save(event);
         entityManager.flush();
         entityManager.clear();
 
         // Then
-        Optional<OutboxEventEntity> updated = springDataOutboxRepository.findById(event.getId());
+        Optional<OutboxEventEntity> updated = jpaOutboxEventRepository.findById(event.getId());
         assertTrue(updated.isPresent());
         assertEquals(OutboxStatus.PUBLISHED, updated.get().getStatus());
         assertNotNull(updated.get().getPublishedAt());
@@ -131,7 +123,7 @@ class JpaOutboxEventRepositoryTest {
         entityManager.flush();
 
         // When
-        List<OutboxEventEntity> pendingEvents = springDataOutboxRepository.findByStatusOrderByCreatedAtAsc(
+        List<OutboxEventEntity> pendingEvents = jpaOutboxEventRepository.findByStatusOrderByCreatedAtAsc(
                 OutboxStatus.PENDING, PageRequest.of(0, 10)
         );
 
@@ -158,11 +150,11 @@ class JpaOutboxEventRepositoryTest {
         entityManager.flush();
 
         // When
-        springDataOutboxRepository.deleteById(event.getId());
+        jpaOutboxEventRepository.deleteById(event.getId());
         entityManager.flush();
 
         // Then
-        Optional<OutboxEventEntity> deleted = springDataOutboxRepository.findById(event.getId());
+        Optional<OutboxEventEntity> deleted = jpaOutboxEventRepository.findById(event.getId());
         assertFalse(deleted.isPresent());
     }
 
@@ -196,7 +188,7 @@ class JpaOutboxEventRepositoryTest {
         entityManager.flush();
 
         // When
-        List<OutboxEventEntity> events = springDataOutboxRepository.findByAggregateTypeAndAggregateIdOrderByCreatedAtAsc(
+        List<OutboxEventEntity> events = jpaOutboxEventRepository.findByAggregateTypeAndAggregateIdOrderByCreatedAtAsc(
                 aggregateType, aggregateId
         );
 
@@ -237,12 +229,12 @@ class JpaOutboxEventRepositoryTest {
         entityManager.flush();
 
         // When
-        int deleted = springDataOutboxRepository.deletePublishedBefore(baseTime.minusSeconds(300));
+        int deleted = jpaOutboxEventRepository.deletePublishedBefore(baseTime.minusSeconds(300));
 
         // Then
         assertEquals(1, deleted);
-        assertFalse(springDataOutboxRepository.existsById(oldEvent.getId()));
-        assertTrue(springDataOutboxRepository.existsById(recentEvent.getId()));
+        assertFalse(jpaOutboxEventRepository.existsById(oldEvent.getId()));
+        assertTrue(jpaOutboxEventRepository.existsById(recentEvent.getId()));
     }
 
     private OutboxEventEntity createOutboxEvent(OutboxStatus status, Instant createdAt) {
@@ -256,196 +248,6 @@ class JpaOutboxEventRepositoryTest {
                 .partitionKey("dcn-123")
                 .headers("{\"correlationId\": \"test-123\"}")
                 .createdAt(createdAt)
-                .build();
-    }
-
-    // Tests for JpaOutboxEventRepository
-
-    @Test
-    void testJpaRepositorySave() {
-        // Given
-        OutboxEvent event = OutboxEvent.builder()
-                .id(UUID.randomUUID())
-                .aggregateType("ProcessedDebitCreditNote")
-                .aggregateId(UUID.randomUUID().toString())
-                .eventType("debitcreditnote.processed")
-                .payload("{\"test\": \"data\"}")
-                .createdAt(Instant.now())
-                .status(OutboxStatus.PENDING)
-                .retryCount(0)
-                .topic("debitcreditnote.processed")
-                .partitionKey("dcn-123")
-                .headers("{\"correlationId\": \"test-123\"}")
-                .build();
-
-        // When
-        OutboxEvent saved = jpaOutboxEventRepository.save(event);
-
-        // Then
-        assertNotNull(saved);
-        assertNotNull(saved.getId());
-        assertEquals("ProcessedDebitCreditNote", saved.getAggregateType());
-        assertEquals("debitcreditnote.processed", saved.getEventType());
-        assertEquals(OutboxStatus.PENDING, saved.getStatus());
-    }
-
-    @Test
-    void testJpaRepositoryFindById() {
-        // Given
-        OutboxEvent event = OutboxEvent.builder()
-                .id(UUID.randomUUID())
-                .aggregateType("ProcessedDebitCreditNote")
-                .aggregateId(UUID.randomUUID().toString())
-                .eventType("debitcreditnote.processed")
-                .payload("{\"test\": \"data\"}")
-                .createdAt(Instant.now())
-                .status(OutboxStatus.PENDING)
-                .retryCount(0)
-                .topic("debitcreditnote.processed")
-                .partitionKey("dcn-123")
-                .headers("{\"correlationId\": \"test-123\"}")
-                .build();
-        OutboxEvent saved = jpaOutboxEventRepository.save(event);
-
-        // When
-        Optional<OutboxEvent> found = jpaOutboxEventRepository.findById(saved.getId());
-
-        // Then
-        assertTrue(found.isPresent());
-        assertEquals(saved.getId(), found.get().getId());
-        assertEquals("ProcessedDebitCreditNote", found.get().getAggregateType());
-    }
-
-    @Test
-    void testJpaRepositoryFindPendingEvents() {
-        // Given
-        Instant baseTime = Instant.now();
-        OutboxEvent pendingEvent1 = createDomainOutboxEvent(OutboxStatus.PENDING, baseTime.minusSeconds(100));
-        OutboxEvent pendingEvent2 = createDomainOutboxEvent(OutboxStatus.PENDING, baseTime.minusSeconds(80));
-        OutboxEvent publishedEvent = createDomainOutboxEvent(OutboxStatus.PUBLISHED, baseTime.minusSeconds(90));
-        jpaOutboxEventRepository.save(pendingEvent1);
-        jpaOutboxEventRepository.save(publishedEvent);
-        jpaOutboxEventRepository.save(pendingEvent2);
-
-        // When
-        List<OutboxEvent> pendingEvents = jpaOutboxEventRepository.findPendingEvents(10);
-
-        // Then
-        assertEquals(2, pendingEvents.size());
-    }
-
-    @Test
-    void testJpaRepositoryFindFailedEvents() {
-        // Given
-        OutboxEvent failedEvent = createDomainOutboxEvent(OutboxStatus.FAILED, Instant.now());
-        OutboxEvent pendingEvent = createDomainOutboxEvent(OutboxStatus.PENDING, Instant.now());
-        jpaOutboxEventRepository.save(failedEvent);
-        jpaOutboxEventRepository.save(pendingEvent);
-
-        // When
-        List<OutboxEvent> failedEvents = jpaOutboxEventRepository.findFailedEvents(10);
-
-        // Then
-        assertEquals(1, failedEvents.size());
-        assertEquals(OutboxStatus.FAILED, failedEvents.get(0).getStatus());
-    }
-
-    @Test
-    void testJpaRepositoryDeletePublishedBefore() {
-        // Given
-        Instant baseTime = Instant.now();
-        OutboxEvent oldEvent = OutboxEvent.builder()
-                .id(UUID.randomUUID())
-                .aggregateType("ProcessedDebitCreditNote")
-                .aggregateId(UUID.randomUUID().toString())
-                .eventType("debitcreditnote.processed")
-                .payload("{\"test\": \"data\"}")
-                .createdAt(baseTime.minusSeconds(3700))
-                .publishedAt(baseTime.minusSeconds(3600))
-                .status(OutboxStatus.PUBLISHED)
-                .retryCount(0)
-                .topic("debitcreditnote.processed")
-                .partitionKey("dcn-123")
-                .headers("{\"correlationId\": \"test-123\"}")
-                .build();
-        OutboxEvent recentEvent = OutboxEvent.builder()
-                .id(UUID.randomUUID())
-                .aggregateType("ProcessedDebitCreditNote")
-                .aggregateId(UUID.randomUUID().toString())
-                .eventType("debitcreditnote.processed")
-                .payload("{\"test\": \"data2\"}")
-                .createdAt(baseTime.minusSeconds(200))
-                .publishedAt(baseTime.minusSeconds(100))
-                .status(OutboxStatus.PUBLISHED)
-                .retryCount(0)
-                .topic("debitcreditnote.processed")
-                .partitionKey("dcn-456")
-                .headers("{\"correlationId\": \"test-456\"}")
-                .build();
-        jpaOutboxEventRepository.save(oldEvent);
-        jpaOutboxEventRepository.save(recentEvent);
-
-        // When
-        int deleted = jpaOutboxEventRepository.deletePublishedBefore(baseTime.minusSeconds(300));
-
-        // Then
-        assertEquals(1, deleted);
-    }
-
-    @Test
-    void testJpaRepositoryFindByAggregate() {
-        // Given
-        String aggregateId = UUID.randomUUID().toString();
-        String aggregateType = "ProcessedDebitCreditNote";
-        OutboxEvent event1 = OutboxEvent.builder()
-                .id(UUID.randomUUID())
-                .aggregateType(aggregateType)
-                .aggregateId(aggregateId)
-                .eventType("debitcreditnote.processed")
-                .payload("{\"test\": \"data\"}")
-                .createdAt(Instant.now())
-                .status(OutboxStatus.PENDING)
-                .retryCount(0)
-                .topic("debitcreditnote.processed")
-                .partitionKey("dcn-123")
-                .headers("{\"correlationId\": \"test-123\"}")
-                .build();
-        OutboxEvent event2 = OutboxEvent.builder()
-                .id(UUID.randomUUID())
-                .aggregateType(aggregateType)
-                .aggregateId(aggregateId)
-                .eventType("debitcreditnote.saga.reply")
-                .payload("{\"test\": \"data2\"}")
-                .createdAt(Instant.now())
-                .status(OutboxStatus.PUBLISHED)
-                .retryCount(0)
-                .topic("debitcreditnote.saga.reply")
-                .partitionKey("dcn-123")
-                .headers("{\"correlationId\": \"test-123\"}")
-                .build();
-        jpaOutboxEventRepository.save(event1);
-        jpaOutboxEventRepository.save(event2);
-
-        // When
-        List<OutboxEvent> events = jpaOutboxEventRepository.findByAggregate(aggregateType, aggregateId);
-
-        // Then
-        assertEquals(2, events.size());
-    }
-
-    private OutboxEvent createDomainOutboxEvent(OutboxStatus status, Instant createdAt) {
-        return OutboxEvent.builder()
-                .id(UUID.randomUUID())
-                .aggregateType("ProcessedDebitCreditNote")
-                .aggregateId(UUID.randomUUID().toString())
-                .eventType("debitcreditnote.processed")
-                .payload("{\"test\": \"data\"}")
-                .createdAt(createdAt)
-                .status(status)
-                .retryCount(0)
-                .topic("debitcreditnote.processed")
-                .partitionKey("dcn-123")
-                .headers("{\"correlationId\": \"test-123\"}")
                 .build();
     }
 }
