@@ -9,6 +9,8 @@ spring:
     show-sql: false
   flyway:
     enabled: false
+  transaction:
+    default-timeout: 10
 
 logging:
   level:
@@ -16,8 +18,26 @@ logging:
     org.hibernate.SQL: OFF
 
 app:
+  parsing:
+    timeout-seconds: 5
+    max-concurrent: 10
+  debitcreditnote:
+    default-due-date-days: 30
+  outbox:
+    cleanup:
+      retention-days: 1
+      cron: "0 0 3 * * *"
+  camel:
+    retry:
+      max-redeliveries: 1
+      redelivery-delay-ms: 500
+      backoff-multiplier: 1.5
+      max-redelivery-delay-ms: 2000
   kafka:
     bootstrap-servers: kafka-broker:9093
+    consumers:
+      max-poll-records: 10
+      count: 1
     topics:
       debitcreditnote-processed: debitcreditnote.processed.test
       dlq: debitcreditnote.processing.dlq.test

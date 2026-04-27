@@ -37,6 +37,9 @@ spring:
     locations: classpath:db/migration
     validate-on-migrate: true
 
+  transaction:
+    default-timeout: 30
+
   jackson:
     serialization:
       write-dates-as-timestamps: false
@@ -52,8 +55,26 @@ camel:
       auto-discover-object-mapper: true
 
 app:
+  parsing:
+    timeout-seconds: 10
+    max-concurrent: 300
+  debitcreditnote:
+    default-due-date-days: 30
+  outbox:
+    cleanup:
+      retention-days: 7
+      cron: "0 0 2 * * *"
+  camel:
+    retry:
+      max-redeliveries: 3
+      redelivery-delay-ms: 1000
+      backoff-multiplier: 2.0
+      max-redelivery-delay-ms: 10000
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    consumers:
+      max-poll-records: 100
+      count: 3
     topics:
       debitcreditnote-processed: debitcreditnote.processed
       dlq: debitcreditnote.processing.dlq
