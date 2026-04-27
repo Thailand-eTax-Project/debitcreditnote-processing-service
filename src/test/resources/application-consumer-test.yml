@@ -1,0 +1,31 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb
+    driver-class-name: org.h2.Driver
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+  flyway:
+    enabled: false
+
+logging:
+  level:
+    com.wpanther.debitcreditnote.processing: DEBUG
+    org.apache.camel: INFO
+    org.hibernate.SQL: OFF
+
+app:
+  kafka:
+    bootstrap-servers: kafka-broker:9093
+    topics:
+      debitcreditnote-processed: debitcreditnote.processed.consumer-test
+      dlq: debitcreditnote.processing.dlq.consumer-test
+      saga-command-debitcreditnote: saga.command.debitcreditnote.consumer-test
+      saga-compensation-debitcreditnote: saga.compensation.debitcreditnote.consumer-test
+      saga-reply-debitcreditnote: saga.reply.debitcreditnote.consumer-test
+
+camel:
+  springboot:
+    name: debitcreditnote-processing-camel-test
