@@ -5,8 +5,8 @@ import com.wpanther.saga.domain.enums.SagaStep;
 import com.wpanther.saga.domain.model.SagaReply;
 
 /**
- * Concrete SagaReply for the debitcreditnote-processing-service.
- * Published to Kafka topic: saga.reply.debitcreditnote
+ * Concrete SagaReply for the debit-credit-note-processing-service.
+ * Published to Kafka topic: saga.reply.debit-credit-note
  */
 public class DebitCreditNoteReplyEvent extends SagaReply {
 

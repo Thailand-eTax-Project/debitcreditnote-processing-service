@@ -21,9 +21,9 @@ app:
     topics:
       debitcreditnote-processed: debitcreditnote.processed.cdc-test
       dlq: debitcreditnote.processing.dlq.cdc-test
-      saga-command-debitcreditnote: saga.command.debitcreditnote.cdc-test
-      saga-compensation-debitcreditnote: saga.compensation.debitcreditnote.cdc-test
-      saga-reply-debitcreditnote: saga.reply.debitcreditnote.cdc-test
+      saga-command-debit-credit-note: saga.command.debit-credit-note.cdc-test
+      saga-compensation-debit-credit-note: saga.compensation.debit-credit-note.cdc-test
+      saga-reply-debit-credit-note: saga.reply.debit-credit-note.cdc-test
 
 camel:
   springboot:

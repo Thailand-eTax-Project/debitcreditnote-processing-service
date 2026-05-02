@@ -78,9 +78,9 @@ app:
     topics:
       debitcreditnote-processed: debitcreditnote.processed
       dlq: debitcreditnote.processing.dlq
-      saga-command-debitcreditnote: saga.command.debitcreditnote
-      saga-compensation-debitcreditnote: saga.compensation.debitcreditnote
-      saga-reply-debitcreditnote: saga.reply.debitcreditnote
+      saga-command-debit-credit-note: saga.command.debit-credit-note
+      saga-compensation-debit-credit-note: saga.compensation.debit-credit-note
+      saga-reply-debit-credit-note: saga.reply.debit-credit-note
 
 eureka:
   client:

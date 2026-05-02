@@ -11,7 +11,7 @@ import java.util.UUID;
 
 /**
  * Command received from the Saga Orchestrator to process a debit/credit note.
- * Consumed from Kafka topic: saga.command.debitcreditnote
+ * Consumed from Kafka topic: saga.command.debit-credit-note
  */
 @Getter
 public class ProcessDebitCreditNoteCommand extends SagaCommand {

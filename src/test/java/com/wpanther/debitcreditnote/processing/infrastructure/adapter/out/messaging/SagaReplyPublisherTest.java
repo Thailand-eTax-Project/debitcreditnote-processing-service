@@ -27,7 +27,7 @@ class SagaReplyPublisherTest {
 
     @BeforeEach
     void setUp() {
-        publisher = new SagaReplyPublisher(outboxService, headerSerializer, "saga.reply.debitcreditnote");
+        publisher = new SagaReplyPublisher(outboxService, headerSerializer, "saga.reply.debit-credit-note");
     }
 
     @Test
@@ -40,7 +40,7 @@ class SagaReplyPublisherTest {
             any(DebitCreditNoteReplyEvent.class),
             eq("ProcessedDebitCreditNote"),
             eq("saga-1"),
-            eq("saga.reply.debitcreditnote"),
+            eq("saga.reply.debit-credit-note"),
             eq("saga-1"),
             contains("SUCCESS")
         );
@@ -72,7 +72,7 @@ class SagaReplyPublisherTest {
             any(DebitCreditNoteReplyEvent.class),
             eq("ProcessedDebitCreditNote"),
             eq("saga-1"),
-            eq("saga.reply.debitcreditnote"),
+            eq("saga.reply.debit-credit-note"),
             eq("saga-1"),
             contains("FAILURE")
         );
@@ -88,7 +88,7 @@ class SagaReplyPublisherTest {
             any(DebitCreditNoteReplyEvent.class),
             eq("ProcessedDebitCreditNote"),
             eq("saga-1"),
-            eq("saga.reply.debitcreditnote"),
+            eq("saga.reply.debit-credit-note"),
             eq("saga-1"),
             contains("COMPENSATED")
         );
@@ -130,7 +130,7 @@ class SagaReplyPublisherTest {
         ArgumentCaptor<String> topicCaptor = ArgumentCaptor.forClass(String.class);
         verify(outboxService).saveWithRouting(any(), any(), any(), topicCaptor.capture(), any(), any());
 
-        assertEquals("saga.reply.debitcreditnote", topicCaptor.getValue());
+        assertEquals("saga.reply.debit-credit-note", topicCaptor.getValue());
     }
 
     @Test

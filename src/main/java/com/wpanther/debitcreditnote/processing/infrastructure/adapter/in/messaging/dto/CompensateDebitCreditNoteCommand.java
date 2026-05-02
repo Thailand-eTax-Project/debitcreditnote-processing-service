@@ -11,7 +11,7 @@ import java.util.UUID;
 
 /**
  * Compensation command from the Saga Orchestrator to rollback debit/credit note processing.
- * Consumed from Kafka topic: saga.compensation.debitcreditnote
+ * Consumed from Kafka topic: saga.compensation.debit-credit-note
  */
 @Getter
 public class CompensateDebitCreditNoteCommand extends SagaCommand {

@@ -74,9 +74,9 @@ public class SagaRouteConfig extends RouteBuilder {
             .logStackTrace(true));
 
         // ============================================================
-        // CONSUMER ROUTE: saga.command.debitcreditnote (from orchestrator)
+        // CONSUMER ROUTE: saga.command.debit-credit-note (from orchestrator)
         // ============================================================
-        from("kafka:" + topics.sagaCommandDebitcreditnote() + kafkaConsumerParams())
+        from("kafka:" + topics.sagaCommandDebitCreditNote() + kafkaConsumerParams())
             .routeId("saga-command-consumer")
             .log("Received saga command from Kafka: partition=${header[kafka.PARTITION]}, offset=${header[kafka.OFFSET]}")
             .unmarshal().json(JsonLibrary.Jackson, ProcessDebitCreditNoteCommand.class)
@@ -89,9 +89,9 @@ public class SagaRouteConfig extends RouteBuilder {
             .log("Successfully processed saga command");
 
         // ============================================================
-        // CONSUMER ROUTE: saga.compensation.debitcreditnote (from orchestrator)
+        // CONSUMER ROUTE: saga.compensation.debit-credit-note (from orchestrator)
         // ============================================================
-        from("kafka:" + topics.sagaCompensationDebitcreditnote() + kafkaConsumerParams())
+        from("kafka:" + topics.sagaCompensationDebitCreditNote() + kafkaConsumerParams())
             .routeId("saga-compensation-consumer")
             .log("Received compensation command from Kafka: partition=${header[kafka.PARTITION]}, offset=${header[kafka.OFFSET]}")
             .unmarshal().json(JsonLibrary.Jackson, CompensateDebitCreditNoteCommand.class)

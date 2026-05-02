@@ -22,9 +22,9 @@ app:
     topics:
       debitcreditnote-processed: debitcreditnote.processed.consumer-test
       dlq: debitcreditnote.processing.dlq.consumer-test
-      saga-command-debitcreditnote: saga.command.debitcreditnote.consumer-test
-      saga-compensation-debitcreditnote: saga.compensation.debitcreditnote.consumer-test
-      saga-reply-debitcreditnote: saga.reply.debitcreditnote.consumer-test
+      saga-command-debit-credit-note: saga.command.debit-credit-note.consumer-test
+      saga-compensation-debit-credit-note: saga.compensation.debit-credit-note.consumer-test
+      saga-reply-debit-credit-note: saga.reply.debit-credit-note.consumer-test
 
 camel:
   springboot:

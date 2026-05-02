@@ -13,16 +13,16 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * <pre>
  *   app.kafka.topics.debitcreditnote-processed          → debitcreditnoteProcessed
  *   app.kafka.topics.dlq                               → dlq
- *   app.kafka.topics.saga-command-debitcreditnote      → sagaCommandDebitcreditnote
- *   app.kafka.topics.saga-compensation-debitcreditnote → sagaCompensationDebitcreditnote
- *   app.kafka.topics.saga-reply-debitcreditnote        → sagaReplyDebitcreditnote
+ *   app.kafka.topics.saga-command-debit-credit-note      → sagaCommandDebitCreditNote
+ *   app.kafka.topics.saga-compensation-debit-credit-note → sagaCompensationDebitCreditNote
+ *   app.kafka.topics.saga-reply-debit-credit-note        → sagaReplyDebitCreditNote
  * </pre>
  */
 @ConfigurationProperties(prefix = "app.kafka.topics")
 public record KafkaTopicsProperties(
         String debitcreditnoteProcessed,
         String dlq,
-        String sagaCommandDebitcreditnote,
-        String sagaCompensationDebitcreditnote,
-        String sagaReplyDebitcreditnote) {
+        String sagaCommandDebitCreditNote,
+        String sagaCompensationDebitCreditNote,
+        String sagaReplyDebitCreditNote) {
 }

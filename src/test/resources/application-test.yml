@@ -41,6 +41,6 @@ app:
     topics:
       debitcreditnote-processed: debitcreditnote.processed.test
       dlq: debitcreditnote.processing.dlq.test
-      saga-command-debitcreditnote: saga.command.debitcreditnote.test
-      saga-compensation-debitcreditnote: saga.compensation.debitcreditnote.test
-      saga-reply-debitcreditnote: saga.reply.debitcreditnote.test
+      saga-command-debit-credit-note: saga.command.debit-credit-note.test
+      saga-compensation-debit-credit-note: saga.compensation.debit-credit-note.test
+      saga-reply-debit-credit-note: saga.reply.debit-credit-note.test

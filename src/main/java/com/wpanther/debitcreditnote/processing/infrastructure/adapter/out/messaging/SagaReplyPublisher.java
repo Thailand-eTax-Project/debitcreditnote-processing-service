@@ -16,7 +16,7 @@ import java.util.Map;
 
 /**
  * Saga reply publisher - driven adapter that publishes saga replies via outbox pattern.
- * Replies are sent to the orchestrator via configurable saga.reply.debitcreditnote topic.
+ * Replies are sent to the orchestrator via configurable saga.reply.debit-credit-note topic.
  */
 @Component
 @Slf4j
@@ -34,7 +34,7 @@ public class SagaReplyPublisher implements SagaReplyPort {
             OutboxService outboxService,
             HeaderSerializer headerSerializer,
             KafkaTopicsProperties topics) {
-        this(outboxService, headerSerializer, topics.sagaReplyDebitcreditnote());
+        this(outboxService, headerSerializer, topics.sagaReplyDebitCreditNote());
     }
 
     /** Package-private constructor for unit tests that pass the topic string directly. */
